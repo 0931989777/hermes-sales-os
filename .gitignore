@@ -1,0 +1,7 @@
+.env
+poll-state.json
+order-state.json
+node_modules/
+*.bak*
+public/
+ban-moc-landing/

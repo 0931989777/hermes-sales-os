@@ -1,0 +1,12 @@
+Messenger OpenClaw bridge listening on http://127.0.0.1:3020
+Webhook path: /webhook
+[messenger-poll] fallback enabled interval=30s
+[facebook-comment-poll] fallback enabled interval=60s
+Messenger OpenClaw bridge listening on http://127.0.0.1:3020
+Webhook path: /webhook
+[messenger-poll] fallback enabled interval=30s
+[facebook-comment-poll] fallback enabled interval=60s
+Messenger OpenClaw bridge listening on http://127.0.0.1:3020
+Webhook path: /webhook
+[messenger-poll] fallback enabled interval=30s
+[facebook-comment-poll] fallback enabled interval=60s
