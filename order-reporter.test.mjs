@@ -50,7 +50,7 @@ test('2: bot confirms order -> hasPageConfirmedOrder returns true', () => {
   ];
   
   const confirmed = hasPageConfirmedOrder(messages, 'page1');
-  assert.equal(confirmed, true, 'should be confirmed after page sends order confirmation');
+  assert.ok(confirmed, 'should be confirmed after page sends order confirmation');
   
   const order = detectOrder('page1', '123', { name: 'Khach B' }, messages);
   assert.ok(order);
@@ -83,7 +83,7 @@ test('4: customer changes quantity -> uses final confirmed version', () => {
   assert.ok(order);
   // Should capture "mỗi loại 1 túi" not "2 túi"
   const confirmed = hasPageConfirmedOrder(messages, 'page1');
-  assert.equal(confirmed, true);
+  assert.ok(confirmed);
 });
 
 test('5: dedup key is based on page+customer+date+phone+address, not just product name', () => {
@@ -161,5 +161,5 @@ test('pending: after bot confirms -> pending lead should NOT trigger', () => {
   ];
   
   const confirmed = hasPageConfirmedOrder(messages, 'page1');
-  assert.equal(confirmed, true, 'should be confirmed -> pending lead should NOT fire');
+  assert.ok(confirmed, 'should be confirmed -> pending lead should NOT fire');
 });

@@ -471,6 +471,15 @@ async function handleMessengerEvent(event, entryPageId) {
       sourceMessageId: messageId
     });
     if (detectedOrder && shouldConfirmOrderDetailsFromCustomer(effectiveText, recentMessages, pageId)) {
+      // Validate phone: if customer sent an invalid phone, ask again
+      const phoneText = effectiveText.replace(/[\s.\-]/gu, "").trim();
+      const looksLikePhone = /^\d{8,12}$/.test(phoneText) || /^0\d+$/.test(phoneText);
+      if (looksLikePhone && phoneText.length !== 10) {
+        const askPhoneAgain = `Dạ anh/chị cho em xin lại số điện thoại ạ. Số anh/chị vừa gửi có vẻ chưa đúng (cần đủ 10 số ạ).`;
+        console.log(`[messenger] invalid phone detected, asking again page=${pageId || "unknown"} sender=${senderId}`);
+        await safeSendMessengerText(pageId, senderId, askPhoneAgain, "messenger");
+        return;
+      }
       const confirmationReply = buildOrderDetailsConfirmationReply(detectedOrder, customerProfile);
       console.log(`[messenger] confirming detected order page=${pageId || "unknown"} sender=${senderId}`);
       await safeSendMessengerText(pageId, senderId, confirmationReply, "messenger");
@@ -860,6 +869,15 @@ async function processPolledConversation(pageId, conversation, options = {}) {
       return;
     }
     if (detectedOrder && shouldConfirmOrderDetailsFromCustomer(text, messages, pageId)) {
+      // Validate phone: if customer sent an invalid phone, ask again
+      const phoneText = text.replace(/[\s.\-]/gu, "").trim();
+      const looksLikePhone = /^\d{8,12}$/.test(phoneText) || /^0\d+$/.test(phoneText);
+      if (looksLikePhone && phoneText.length !== 10) {
+        const askPhoneAgain = `Dạ anh/chị cho em xin lại số điện thoại ạ. Số anh/chị vừa gửi có vẻ chưa đúng (cần đủ 10 số ạ).`;
+        console.log(`[messenger-poll] invalid phone detected, asking again page=${pageId} sender=${customerProfile.id}`);
+        await safeSendMessengerText(pageId, customerProfile.id, askPhoneAgain, "messenger-poll");
+        return;
+      }
       const confirmationReply = buildOrderDetailsConfirmationReply(detectedOrder, customerProfile);
       console.log(`[messenger-poll] confirming detected order page=${pageId} sender=${customerProfile.id}`);
       await sendSenderAction(pageId, customerProfile.id, "typing_on").catch(() => {});
@@ -1245,13 +1263,26 @@ function shouldConfirmOrderDetailsFromCustomer(text, messages, pageId) {
     .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .replace(/\s+/gu, " ")
     .trim();
-  const customerGaveContactDetails =
-    extractPhonesFromText(customerText).length > 0 ||
-    extractDetailedAddressLinesFromText(customerText).length > 0;
+
+  // Customer gave contact info in current message
+  const customerGavePhone = extractPhonesFromText(customerText).length > 0;
+  const customerGaveAddress = extractDetailedAddressLinesFromText(customerText).length > 0;
+  const customerGaveContactDetails = customerGavePhone || customerGaveAddress;
+
+  // Page asked for order details
   const pageAskedForOrderDetails = [
-    /\b(cho em xin|xin so dien thoai|xin sdt|xin dia chi|dia chi nhan hang)\b/u,
+    /\b(cho em xin|xin so dien thoai|xin sdt|xin dia chi|dia chi nhan hang|sdt|so dien thoai)\b/u,
     /\b(len don|chot don|don 1|tong)\b/u
   ].some((pattern) => pattern.test(normalizedPage));
+
+  // Fallback: if customer sent only a phone number (digit-only, 9-11 chars)
+  // and page asked for phone in recent messages, treat as contact details
+  const phoneOnlyText = customerText.replace(/[\s.\-]/gu, "").trim();
+  const isPhoneOnly = /^\d{10}$/.test(phoneOnlyText);
+  const pageAskedForPhone = /\b(so dien thoai|sdt|phone)\b/u.test(normalizedPage);
+  if (!customerGaveContactDetails && isPhoneOnly && pageAskedForPhone) {
+    return true;
+  }
 
   return customerGaveContactDetails && pageAskedForOrderDetails;
 }
@@ -2351,7 +2382,7 @@ async function askHermesCli(pageId, senderId, customerProfile, text, options = {
     "",
     options.userMessage || buildOpenClawUserMessage(pageId, senderId, customerProfile, text, options),
     "",
-    "Truoc khi tra loi, hay doc ky toan bo lich su hoi thoai va noi dung khach hoi de hieu dung cau hoi. Tra loi bang tieng Viet ngan gon, dung vai tro nhan vien ban hang Ban Moc. Khong nhac den he thong noi bo. Khong chao hoi neu khach dang trong mach hoi thoai."
+    "Truoc khi tra loi, hay doc ky toan bo lich su hoi thoai va noi dung khach hoi de hieu dung cau hoi. Tra loi bang tieng Viet ngan gon, dung vai tro nhan vien ban hang Ban Moc. Khong nhac den he thong noi bo. Khong chao hoi neu khach dang trong mach hoi thoai. QUAN TRONG: Khong bao gio hua mien ship cho don 1 tui (phai tinh 20k ship). Khong hua hen ngay gio giao hang cu the (chi noi se giao som nhat co the)."
   ].join("\n");
 
   const result = await runCommand(config.hermesCliBin, [message], {

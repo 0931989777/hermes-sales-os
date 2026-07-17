@@ -179,12 +179,21 @@ export function isOrderConfirmationMessage(text) {
 
 export function hasPageConfirmedOrder(messages, pageId, customerSourceAt = 0) {
   const sourceAt = Number(customerSourceAt || 0);
-  return (messages || []).some((message) => {
-    if (String(message?.from?.id || "") !== String(pageId)) return false;
+  // Find the LATEST confirmation message, not just any
+  let latestConfirmedAt = 0;
+  let latestConfirmed = null;
+  for (const message of (messages || [])) {
+    if (String(message?.from?.id || "") !== String(pageId)) continue;
     const createdAt = new Date(message?.created_time || 0).getTime();
-    if (sourceAt && createdAt < sourceAt) return false;
-    return isOrderConfirmationMessage(message.message);
-  });
+    if (sourceAt && createdAt < sourceAt) continue;
+    if (isOrderConfirmationMessage(message.message)) {
+      if (createdAt > latestConfirmedAt) {
+        latestConfirmedAt = createdAt;
+        latestConfirmed = message;
+      }
+    }
+  }
+  return latestConfirmed ? latestConfirmed.message : false;
 }
 
 // ── Product Extraction ───────────────────────────────────────────────────────
@@ -206,7 +215,8 @@ export function extractOrderNotifyProduct(text) {
     const products = extractOrderNotifyProductNames(chosenLine);
     const quantity = parseOrderNotifyQuantity(chosenLine);
     if (products.length > 0 && quantity) {
-      return `${products.join(", ")} - ${formatOrderNotifyQuantity(quantity)}`;
+      // Multi-product: apply quantity to each product separately
+      return products.map((p) => `${p} - ${formatOrderNotifyQuantity(quantity)}`).join("; ");
     }
     return cleanOrderNotifyProduct(chosenLine);
   }
@@ -214,6 +224,9 @@ export function extractOrderNotifyProduct(text) {
   const products = extractOrderNotifyProductNames(text);
   const quantity = parseOrderNotifyQuantity(text);
   if (products.length === 0) return "";
+  if (products.length > 1 && quantity) {
+    return products.map((p) => `${p} - ${formatOrderNotifyQuantity(quantity)}`).join("; ");
+  }
   return `${products.join(", ")}${quantity ? ` - ${formatOrderNotifyQuantity(quantity)}` : ""}`;
 }
 
