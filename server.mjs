@@ -410,6 +410,13 @@ async function handleMessengerEvent(event, entryPageId) {
   }
 
   const text = typeof message.text === "string" ? message.text.trim() : "";
+
+  // Facebook reactions (likes, hearts, etc.) — skip silently
+  if (!text && !message.attachments?.length && message.reaction) {
+    if (messageId) markMessengerMessageProcessed(pageId, messageId);
+    return;
+  }
+
   const imageAttachments = getMessengerImageAttachments(message);
   if (!text && imageAttachments.length === 0) {
     if (messageId) markMessengerMessageProcessed(pageId, messageId);
@@ -483,6 +490,10 @@ async function handleMessengerEvent(event, entryPageId) {
       const confirmationReply = buildOrderDetailsConfirmationReply(detectedOrder, customerProfile);
       console.log(`[messenger] confirming detected order page=${pageId || "unknown"} sender=${senderId}`);
       await safeSendMessengerText(pageId, senderId, confirmationReply, "messenger");
+      // Block product images for 5 min after order confirmation
+      messengerPollState.lastOrderConfirmations = messengerPollState.lastOrderConfirmations || {};
+      messengerPollState.lastOrderConfirmations[`order-confirm:${pageId || "unknown"}:${senderId}`] = Date.now();
+      saveMessengerPollState();
       await maybeNotifyNewOrder(pageId, senderId, customerProfile, [
         ...recentMessages,
         { id: `bot-confirmed:${messageId}:${Date.now()}`, created_time: new Date().toISOString(), from: { id: pageId }, message: confirmationReply }
@@ -494,14 +505,15 @@ async function handleMessengerEvent(event, entryPageId) {
       conversationHistory
     });
     const normalizedReply = normalizeCustomerAddressing(reply, customerProfile) || "Minh chua co cau tra loi phu hop luc nay.";
+    const safeReply = filterUnsafeReplyContent(normalizedReply, senderId, pageId);
     if (await shouldSkipMessengerReplyBecausePageAnswered(pageId, senderId, sourceAt)) {
       console.log(`[messenger] skipped sending OpenClaw reply because page answered during processing page=${pageId || "unknown"} sender=${senderId}`);
       return;
     }
-    const sent = await safeSendMessengerText(pageId, senderId, normalizedReply, "messenger");
+    const sent = await safeSendMessengerText(pageId, senderId, safeReply, "messenger");
     if (sent) {
-      console.log(`[messenger] sent OpenClaw reply page=${pageId || "unknown"} recipient=${senderId} chars=${normalizedReply.length}`);
-      await sendProductMediaForMessage(pageId, senderId, text || effectiveText);
+      recordMessengerBotSent(pageId, senderId, messageId || "", safeReply);
+      console.log(`[messenger] sent OpenClaw reply page=${pageId || "unknown"} recipient=${senderId} chars=${safeReply.length}`);
       maybeScheduleSalesFollowUp(pageId, senderId, customerProfile, effectiveText, Date.now());
     }
   } catch (error) {
@@ -881,6 +893,10 @@ async function processPolledConversation(pageId, conversation, options = {}) {
       const confirmationReply = buildOrderDetailsConfirmationReply(detectedOrder, customerProfile);
       console.log(`[messenger-poll] confirming detected order page=${pageId} sender=${customerProfile.id}`);
       await sendSenderAction(pageId, customerProfile.id, "typing_on").catch(() => {});
+      // Block product images for 5 min after order confirmation
+      messengerPollState.lastOrderConfirmations = messengerPollState.lastOrderConfirmations || {};
+      messengerPollState.lastOrderConfirmations[`order-confirm:${pageId}:${customerProfile.id}`] = Date.now();
+      saveMessengerPollState();
       if (await shouldSkipMessengerReplyBecausePageAnswered(pageId, customerProfile.id, latestMessageAt)) {
         console.log(`[messenger-poll] skipped sending order confirmation because page answered during processing page=${pageId} sender=${customerProfile.id}`);
         return;
@@ -913,15 +929,16 @@ async function processPolledConversation(pageId, conversation, options = {}) {
       conversationHistory: formatMessengerConversationHistory(pageId, messages)
     });
     const normalizedReply = normalizeCustomerAddressing(reply, customerProfile) || "Minh chua co cau tra loi phu hop luc nay.";
+    const safeReply = filterUnsafeReplyContent(normalizedReply, customerProfile.id, pageId);
     if (await shouldSkipMessengerReplyBecausePageAnswered(pageId, customerProfile.id, latestMessageAt)) {
       console.log(`[messenger-poll] skipped sending OpenClaw reply because page answered during processing page=${pageId} sender=${customerProfile.id}`);
       return;
     }
-    await sendMessengerText(pageId, customerProfile.id, normalizedReply);
+    await sendMessengerText(pageId, customerProfile.id, safeReply);
     await sendProductMediaForMessage(pageId, customerProfile.id, text);
     maybeScheduleSalesFollowUp(pageId, customerProfile.id, customerProfile, text, latestMessageAt);
     clearPendingMessengerRetry(pageId, conversationId, customerProfile.id);
-    console.log(`[messenger-poll] sent fallback OpenClaw reply page=${pageId} recipient=${customerProfile.id} chars=${normalizedReply.length}`);
+    console.log(`[messenger-poll] sent fallback OpenClaw reply page=${pageId} recipient=${customerProfile.id} chars=${safeReply.length}`);
   } catch (error) {
     const isPermanentSendFailure = isPermanentMessengerSendError(error);
     if (!isPermanentSendFailure && messengerPollState.processedConversations?.[stateKey] === latestMessageAt) {
@@ -1255,6 +1272,14 @@ function shouldConfirmOrderDetailsFromCustomer(text, messages, pageId) {
     .filter((message) => message?.created_time && typeof message.message === "string")
     .sort((a, b) => new Date(a.created_time) - new Date(b.created_time))
     .slice(-10);
+
+  // Also check recent CUSTOMER messages (not just current) for phone/address
+  const recentCustomerMessages = recentMessages
+    .filter((message) => String(message?.from?.id || "") !== String(pageId));
+  const recentCustomerText = recentCustomerMessages
+    .map((message) => message.message)
+    .join("\n");
+
   const pageText = recentMessages
     .filter((message) => String(message?.from?.id || "") === String(pageId))
     .map((message) => message.message)
@@ -1264,9 +1289,9 @@ function shouldConfirmOrderDetailsFromCustomer(text, messages, pageId) {
     .replace(/\s+/gu, " ")
     .trim();
 
-  // Customer gave contact info in current message
-  const customerGavePhone = extractPhonesFromText(customerText).length > 0;
-  const customerGaveAddress = extractDetailedAddressLinesFromText(customerText).length > 0;
+  // Customer gave contact info in current message OR recent messages
+  const customerGavePhone = extractPhonesFromText(customerText).length > 0 || extractPhonesFromText(recentCustomerText).length > 0;
+  const customerGaveAddress = extractDetailedAddressLinesFromText(customerText).length > 0 || extractDetailedAddressLinesFromText(recentCustomerText).length > 0;
   const customerGaveContactDetails = customerGavePhone || customerGaveAddress;
 
   // Page asked for order details
@@ -1805,8 +1830,17 @@ function getSalesFollowUpKey(pageId, recipientId) {
 }
 
 async function sendProductMediaForMessage(pageId, recipientId, text) {
+  // NEVER send product images during order flow — only when customer explicitly asks
   if (!isExplicitProductMediaRequest(text)) {
     console.log(`[messenger-media] skipped because customer did not ask for images page=${pageId || "unknown"} recipient=${recipientId}`);
+    return;
+  }
+
+  // Block images if bot recently sent an order confirmation (within 24 hours — covers the entire order lifecycle)
+  const lastOrderConfirmKey = `order-confirm:${pageId || "unknown"}:${recipientId}`;
+  const lastOrderConfirmAt = Number(messengerPollState.lastOrderConfirmations?.[lastOrderConfirmKey] || 0);
+  if (lastOrderConfirmAt && (Date.now() - lastOrderConfirmAt) < 24 * 60 * 60 * 1000) {
+    console.log(`[messenger-media] BLOCKED images — order was confirmed for this customer page=${pageId || "unknown"} recipient=${recipientId}`);
     return;
   }
 
@@ -2382,7 +2416,7 @@ async function askHermesCli(pageId, senderId, customerProfile, text, options = {
     "",
     options.userMessage || buildOpenClawUserMessage(pageId, senderId, customerProfile, text, options),
     "",
-    "Truoc khi tra loi, hay doc ky toan bo lich su hoi thoai va noi dung khach hoi de hieu dung cau hoi. Tra loi bang tieng Viet ngan gon, dung vai tro nhan vien ban hang Ban Moc. Khong nhac den he thong noi bo. Khong chao hoi neu khach dang trong mach hoi thoai. QUAN TRONG: Khong bao gio hua mien ship cho don 1 tui (phai tinh 20k ship). Khong hua hen ngay gio giao hang cu the (chi noi se giao som nhat co the)."
+    "Truoc khi tra loi, hay doc ky toan bo lich su hoi thoai va noi dung khach hoi de hieu dung cau hoi. Tra loi bang tieng Viet ngan gon, dung vai tro nhan vien ban hang Ban Moc. Khong nhac den he thong noi bo. Khong chao hoi neu khach dang trong mach hoi thoai. QUAN TRONG: Khong bao gio hua mien ship cho don 1 tui (phai tinh 20k ship). Khong hua hen ngay gio giao hang cu the (chi noi se giao som nhat co the). KHONG TU Y NOI VE CHUYEN KHOAN / THANH TOAN — ben em chi ship COD, khach khong can chuyen khoan truoc."
   ].join("\n");
 
   const result = await runCommand(config.hermesCliBin, [message], {
@@ -2407,6 +2441,41 @@ function looksLikeHermesCliFailure(output) {
     /No available channel for model/i.test(normalized) ||
     /\bdistributor\b/i.test(normalized)
   );
+}
+
+
+
+/**
+ * Hard content filter — blocks fabricated/hallucinated content before sending.
+ * Returns filtered text (original if safe, fallback if blocked).
+ */
+function filterUnsafeReplyContent(text, senderId, pageId) {
+  if (!text || typeof text !== "string") return text || "";
+  const normalized = normalizeSearchText(text);
+
+  // 1. Block fabricated bank transfer / payment talk
+  const bannedPaymentPhrases = [
+    /chuyen\s*khoan/iu,
+    /(xac\s*nhan|da\s*nhan\s*duoc)\s+thanh\s*toan/iu,
+    /anh\s*chuyen\s*khoan/iu,
+    /da\s*nhan\s*duoc\s*anh.*(chuyen\s*khoan|thanh\s*toan)/iu,
+    /kiem\s*tra.*(thanh\s*toan|chuyen\s*khoan)/iu,
+  ];
+
+  for (const pattern of bannedPaymentPhrases) {
+    if (pattern.test(normalized)) {
+      console.warn(`[content-filter] BLOCKED fabricated payment content page=${pageId || "unknown"} sender=${senderId}: ${text.slice(0, 100)}`);
+      return "Dạ em xin lỗi anh/chị, em trả lời chưa đúng ạ. Anh/chị cho em hỏi lại ý mình cần em hỗ trợ thêm gì ạ?";
+    }
+  }
+
+  // 2. Block "đã nhận được ảnh" when customer likely didn't send one
+  if (/da\s*nhan\s*duoc\s*anh/iu.test(normalized) && normalized.length < 300) {
+    console.warn(`[content-filter] BLOCKED likely-fabricated photo claim page=${pageId || "unknown"} sender=${senderId}: ${text.slice(0, 100)}`);
+    return "Dạ em xin lỗi anh/chị, em trả lời chưa đúng ạ. Anh/chị cho em hỏi lại ý mình cần em hỗ trợ thêm gì ạ?";
+  }
+
+  return text;
 }
 
 function normalizeCustomerAddressing(reply, customerProfile) {

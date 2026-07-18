@@ -61,6 +61,8 @@ compression:
   protect_last_n: 20
   target_ratio: 0.2
   threshold: 0.5
+curator:
+  deliver: local
 custom_providers:
 - api_key: sk-SnjCGDZgnjqKgXpLc01cBHMUquCjwwePTGI6Rq7maPjIKbKi
   base_url: https://cheapkeyai.shop/v1
