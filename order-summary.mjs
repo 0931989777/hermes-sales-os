@@ -199,15 +199,34 @@ function formatReport(pageSummaries) {
   return lines.join("\n").trim();
 }
 
+function cleanOrderField(value) {
+  if (!value) return "";
+  const text = String(value)
+    .replace(/^(tổng tiền|tong tien|tổng|tong)\s*[:：]?\s*/iu, "")
+    .trim();
+  // Extract just the price portion: first occurrence of number+đ pattern
+  const match = text.match(/[\d.,]+\s*đ\b/u);
+  return match ? match[0] : (/[\d]/.test(text) ? text : "");
+}
+
 function formatOrder(order, index) {
   const fields = order.confirmationFields || {};
   const productAmount = fields.subtotal || (order.estimatedTotal ? formatVnd(estimateProductAmount(order)) : "");
   const shippingAmount = fields.shipping || (order.estimatedTotal ? formatVnd(estimateShippingAmount(order)) : "");
-  const totalAmount = fields.total || (order.estimatedTotal ? formatVnd(order.estimatedTotal) : "");
+  const totalAmount = cleanOrderField(fields.total) || (order.estimatedTotal ? formatVnd(order.estimatedTotal) : "");
 
   // Strip prices from product text (e.g. ": 330.000đ")
-  const cleanProduct = (fields.product || formatProductQuantity(order))
-    .replace(/\s*:\s*[\d.,]+đ?\s*/gu, " ")
+  const rawProduct = fields.product || formatProductQuantity(order);
+  const cleanProduct = rawProduct
+    .replace(/\\s*:\\s*[\\d.,]+đ?\\s*/gu, " ")
+    .replace(/\\s*•\\s*/gu, " ")
+    .replace(/\\s+/gu, " ")
+    .trim();
+
+  const rawAddress = fields.address || formatAddress(order);
+  const cleanAddress = rawAddress
+    .replace(/^(đ\/c|đc|dc|địa chỉ|dia chi)\s*[:：]?\s*/iu, "")
+    .replace(/\s*•\s*/gu, " ")
     .replace(/\s+/gu, " ")
     .trim();
 
@@ -218,7 +237,7 @@ function formatOrder(order, index) {
     `- Sản phẩm: ${cleanProduct}`,
     `- Phí ship: ${shippingAmount || "chưa rõ"}`,
     `- Tổng tiền: ${totalAmount || "chưa rõ"}`,
-    `- Địa chỉ: ${fields.address || formatAddress(order)}`,
+    `- Địa chỉ: ${cleanAddress}`,
     `- SĐT: ${fields.phone || order.phones.join(", ") || "chưa thấy"}`
   ].filter(Boolean).join("\n");
 }
