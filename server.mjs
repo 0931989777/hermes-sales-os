@@ -412,11 +412,18 @@ async function handleMessengerEvent(event, entryPageId) {
   const text = typeof message.text === "string" ? message.text.trim() : "";
 
   // Facebook reactions (likes, hearts, etc.) — skip silently
-  // Facebook may send reactions as: { reaction: {...} } or as text emoji "👍"
+  // Facebook may send reactions as:
+  //   1. { reaction: {...} } object
+  //   2. text emoji "👍"
+  //   3. sticker attachment (type: "sticker" or like emoji sticker)
   const isReaction = Boolean(message?.reaction);
-  const isReactionEmoji = !isReaction && text && /^[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}]+$/u.test(text) && text.length <= 4;
-  if (isReaction || isReactionEmoji) {
+  const isReactionEmoji = !isReaction && text && /^[\u{1F600}-\u{1F64F}\u{1F300}-\u{1F5FF}\u{1F680}-\u{1F6FF}\u{1F1E0}-\u{1F1FF}\u{2600}-\u{26FF}\u{2700}-\u{27BF}\u{1F900}-\u{1F9FF}\u{1FA00}-\u{1FA6F}\u{1FA70}-\u{1FAFF}\u{1F44D}\u{2764}\u{1F44F}\u{1F60D}\u{1F606}\u{1F62E}\u{1F622}\u{1F621}\u{1F620}\u{1F480}]+$/u.test(text) && text.length <= 4;
+  const isReactionSticker = !isReaction && !isReactionEmoji && !text && (message?.attachments || []).some(
+    (att) => att?.type === "sticker" || att?.type === "reaction" || String(att?.payload?.sticker_id || "").startsWith("3692")
+  );
+  if (isReaction || isReactionEmoji || isReactionSticker) {
     if (messageId) markMessengerMessageProcessed(pageId, messageId);
+    console.log(`[messenger] skipped reaction/like page=${pageId || "unknown"} sender=${senderId}`);
     return;
   }
 
@@ -1240,10 +1247,24 @@ function detectNewOrderForNotification(pageId, recipientId, customerProfile, mes
 
   const allCustomerText = customerMessages.map((message) => message.message).join("\n");
   const allRecentText = recentMessages.map((message) => message.message).join("\n");
+
+  // Only use RECENT customer messages for order detection (within last 10 minutes)
+  // This prevents old order data from triggering false confirmations
+  const tenMinAgo = Date.now() - 10 * 60 * 1000;
+  const recentCustomerMessages = customerMessages.filter(
+    (message) => new Date(message.created_time).getTime() >= tenMinAgo
+  );
+  const recentCustomerText = recentCustomerMessages.map((message) => message.message).join("\n");
+
   const phones = extractPhonesFromText(allCustomerText);
   const address = cleanOrderNotifyAddress(extractDetailedAddressLinesFromText(allCustomerText).at(-1) || "");
   const product = extractOrderNotifyProduct(allRecentText) || extractOrderNotifyProduct(allCustomerText);
   if (phones.length === 0 || !address || !product) return null;
+
+  // Require at least ONE of phone/address to be from recent messages (not just old history)
+  const phonesRecent = extractPhonesFromText(recentCustomerText);
+  const addressRecent = cleanOrderNotifyAddress(extractDetailedAddressLinesFromText(recentCustomerText).at(-1) || "");
+  if (phonesRecent.length === 0 && !addressRecent) return null;
 
   const sourceAt = Number(options.sourceAt || new Date(customerMessages.at(-1).created_time).getTime() || Date.now());
   const quantities = parseOrderNotifyQuantities(product);
@@ -1271,6 +1292,19 @@ function detectNewOrderForNotification(pageId, recipientId, customerProfile, mes
 
 function shouldConfirmOrderDetailsFromCustomer(text, messages, pageId) {
   const customerText = String(text || "");
+
+  // Customer is asking about EXISTING order — NOT a new order
+  const normalizedCustomer = normalizeSearchText(customerText);
+  const isOrderInquiry = [
+    /\b(lau the|chua toi|chua nhan|chua thay|bao gio|khi nao|den noi|sao chua|van chua)\b/u,
+    /\b(don hang|giao hang|ship)\s+(cua|anh|chi|em|minh)\b/u,
+    /\b(hang|cua anh|cua chi)\s+(lau|chua|sao)\b/u,
+  ].some((p) => p.test(normalizedCustomer));
+
+  // Customer is complaining about delivery — treat as after-sales, not new order
+  if (isOrderInquiry && normalizedCustomer.length < 100) {
+    return false;
+  }
   const recentMessages = (messages || [])
     .filter((message) => message?.created_time && typeof message.message === "string")
     .sort((a, b) => new Date(a.created_time) - new Date(b.created_time))
