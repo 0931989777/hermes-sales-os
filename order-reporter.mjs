@@ -358,14 +358,14 @@ export function detectOrder(pageId, customerId, customerProfile, messages, optio
   const recentMessages = (messages || [])
     .filter((message) => message?.created_time && typeof message.message === "string")
     .sort((a, b) => new Date(a.created_time) - new Date(b.created_time))
-    .slice(-12);
+    .slice(-24);  // Wider window to catch product qty from earlier confirmation
   const customerMessages = recentMessages
     .filter((message) => String(message?.from?.id || "") !== String(pageId));
   if (customerMessages.length === 0) return null;
 
   const allCustomerText = customerMessages.map((message) => message.message).join("\n");
   const allRecentText = recentMessages.map((message) => message.message).join("\n");
-  const phones = extractPhonesFromText(allCustomerText);
+  const phones = extractPhonesFromText(allRecentText);  // Check ALL messages including bot replies
   const address = cleanOrderNotifyAddress(extractDetailedAddressLinesFromText(allCustomerText).at(-1) || "");
   const product = extractOrderNotifyProduct(allRecentText) || extractOrderNotifyProduct(allCustomerText);
   if (phones.length === 0 || !address || !product) return null;

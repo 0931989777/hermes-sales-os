@@ -507,7 +507,9 @@ async function handleMessengerEvent(event, entryPageId) {
       await maybeNotifyNewOrder(pageId, senderId, customerProfile, [
         ...recentMessages,
         { id: `bot-confirmed:${messageId}:${Date.now()}`, created_time: new Date().toISOString(), from: { id: pageId }, message: confirmationReply }
-      ], { confirmed: true, sourceMessageId: messageId, sourceAt }).catch(() => {});
+      ], { confirmed: true, sourceMessageId: messageId, sourceAt }).catch((error) => {
+        console.error(`[messenger] order notification failed page=${pageId || "unknown"} sender=${senderId}:`, error?.message || error);
+      });
       clearPendingSalesFollowUp(pageId, senderId);
       return;
     }
@@ -1305,6 +1307,14 @@ function shouldConfirmOrderDetailsFromCustomer(text, messages, pageId) {
   if (isOrderInquiry && normalizedCustomer.length < 100) {
     return false;
   }
+
+  // DON'T re-confirm if we already confirmed for this customer recently (within 5 minutes)
+  const senderId = messages?.[0]?.from?.id;
+  const lastOrderConfirmKey = `order-confirm:${pageId || "unknown"}:${senderId || "unknown"}`;
+  const lastOrderConfirmAt = Number(messengerPollState.lastOrderConfirmations?.[lastOrderConfirmKey] || 0);
+  if (lastOrderConfirmAt && (Date.now() - lastOrderConfirmAt) < 5 * 60 * 1000) {
+    return false;
+  }
   const recentMessages = (messages || [])
     .filter((message) => message?.created_time && typeof message.message === "string")
     .sort((a, b) => new Date(a.created_time) - new Date(b.created_time))
@@ -1494,7 +1504,7 @@ function extractOrderNotifyProductNames(text) {
   if (/\b(ngo men la|ruou ngo)\b/u.test(normalized) || (/\bmen la\b/u.test(normalized) && !/\btam giac mach\b/u.test(normalized))) {
     products.push("rượu ngô men lá");
   }
-  if (/\b(tam giac mach|mach)\b/u.test(normalized)) products.push("rượu tam giác mạch");
+  if (/\b(tam giac mach|tâm giac mach|mach)\b/u.test(normalized)) products.push("rượu tam giác mạch");
   if (/\bruou\b/u.test(normalized) && products.length === 0) products.push("rượu");
   return products;
 }
@@ -1515,9 +1525,33 @@ function parseOrderNotifyQuantity(text) {
   if (!match) return null;
   const amount = Number.parseInt(match[1], 10);
   if (!Number.isFinite(amount) || amount <= 0) return null;
-  const unit = normalizeSearchText(match[2]) === "tui" ? "túi" : normalizeSearchText(match[2]);
-  const volume = match[3] ? `${match[3]}L` : unit === "túi" ? "5L" : "";
-  return { amount, unit, volume };
+  const rawUnit = normalizeSearchText(match[2]);
+  let unit, adjustedAmount;
+  if (rawUnit === "tui") {
+    unit = "túi";
+    adjustedAmount = amount;
+  } else if (rawUnit === "can") {
+    unit = "can";
+    adjustedAmount = amount;
+  } else {
+    // "l", "lit", "lít" — normalize based on amount
+    if (amount >= 20) {
+      unit = "can";
+      adjustedAmount = Math.round(amount / 20);
+    } else if (amount === 5) {
+      unit = "túi";
+      adjustedAmount = 1;
+    } else if (amount >= 10) {
+      unit = "can";
+      adjustedAmount = 1;
+    } else {
+      // small amount zl — unlikely, treat as túi
+      unit = "túi";
+      adjustedAmount = amount;
+    }
+  }
+  const volume = match[3] ? `${match[3]}L` : unit === "túi" ? "5L" : unit === "can" ? "20L" : "";
+  return { amount: adjustedAmount, unit, volume };
 }
 
 function parseOrderNotifyQuantities(text) {

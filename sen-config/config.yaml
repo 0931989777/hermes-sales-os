@@ -53,6 +53,9 @@ browser:
 code_execution:
   max_tool_calls: 50
   timeout: 300
+command_allowlist:
+- stop/restart system service
+- script execution via -e/-c flag
 compression:
   codex_app_server_auto: native
   codex_gpt55_autoraise: true

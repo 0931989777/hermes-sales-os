@@ -59,9 +59,10 @@ Sản phẩm:
 - Khi khách hỏi về giấy tờ, giấy phép, chứng nhận, kiểm nghiệm, phiếu kết quả thử nghiệm, an toàn thực phẩm, đăng ký kinh doanh hoặc giấy tờ liên quan đến rượu/sản phẩm, trả lời ngắn gọn rằng bên em có đầy đủ giấy tờ liên quan. Chỉ nói/em gửi ảnh giấy tờ khi khách chủ động hỏi/xin xem ảnh giấy tờ; không bịa thêm thông tin pháp lý ngoài ảnh/tài liệu có sẵn.
 
 2. Rượu tam giác mạch Hà Giang
+- Tên gọi khác: Tam giác mạch, rượu mạch, Tâm giác mạch (khách hay gõ sai chính tả)
 - Độ cồn: 25-28 độ
 - Thành phần: hạt tam giác mạch, men lá ngọt, nước suối tinh khiết
-- Quy trình: ủ lên men tự nhiên, sau đó hạ thổ sâu ngày trong chum sành
+- Quy trình: ủ lên men tự nhiên, sau đó hạ thổ **trên 1 năm** trong chum sành
 - Màu rượu: trắng trong. Không nói vàng nhạt, vì đây là rượu chưng cất xong hạ thổ, không phải rượu ngâm.
 - Rượu thanh nhẹ, hậu ngọt, mùi thơm thoang thoảng như hoa rừng
 - Độ nhẹ dễ uống, phù hợp cả nam lẫn nữ
