@@ -122,7 +122,13 @@ function extractDetailedAddressLinesFromText(text) {
   return String(text || "")
     .split(/\r?\n/u)
     .map((line) => line.trim())
-    .filter((line) => line && (addressPattern.test(line) || looksLikeStreetAddress(line)) && isDetailedAddressText(line));
+    .filter((line) => line && (addressPattern.test(line) || looksLikeStreetAddress(line)) && isDetailedAddressText(line) && !isPriceOrQuestionLine(line));
+}
+
+function isPriceOrQuestionLine(line) {
+  const normalized = normalizeSearchText(line);
+  return /\b(gia|giam|bao nhieu|tien|tong|thanh toan|chuyen khoan)\b/u.test(normalized)
+    && !/\b(so nha|sn|thon|xom|ap|ban|duong|ngo|ngach|hem|xa|phuong|huyen|quan|tp|tinh)\b/u.test(normalized);
 }
 
 function isDetailedAddressText(line) {
