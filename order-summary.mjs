@@ -185,6 +185,7 @@ function formatReport(pageSummaries) {
       lines.push("Chưa có đơn đủ SĐT + địa chỉ chi tiết.");
     } else {
       page.orders.slice(0, 20).forEach((order, index) => {
+        if (index > 0) lines.push("--------------------");
         lines.push(formatOrder(order, index + 1));
       });
     }
@@ -231,8 +232,8 @@ function formatOrder(order, index) {
     .trim();
 
   return [
-    "",
     `* Đơn ${index}:`,
+    `- Thời gian: ${formatTime(order.latestAt)} ${formatLocalDate(new Date(order.latestAt))}`,
     `- Tên khách: ${fields.customerName || order.customerName || "Khách"}`,
     `- Sản phẩm: ${cleanProduct}`,
     `- Phí ship: ${shippingAmount || "chưa rõ"}`,

@@ -38,9 +38,169 @@ test('product color question says clear white instead of pale yellow', () => {
   assert.doesNotMatch(reply, /gửi ảnh sản phẩm/i);
 });
 
+test('aldehyde treatment questions receive the verified production answer', () => {
+  for (const text of [
+    'Rượu đã khử andehit chưa?',
+    'Bên mình lọc an đe hit chưa shop?',
+    'Đã xử lý aldehyde chưa?'
+  ]) {
+    const reply = __test.buildEmergencySalesReply(text);
+    assert.match(reply, /đã được lọc/i);
+    assert.match(reply, /khử andehit/i);
+    assert.match(reply, /quá trình lão hóa/i);
+  }
+});
+
 test('generic look-up phrase is not treated as product media request', () => {
   assert.equal(__test.isExplicitProductMediaRequest('Xem từ trên đi'), false);
   assert.equal(__test.getMatchedProductMediaRules('Xem từ trên đi').length, 0);
+});
+
+test('generic product bag photo request selects product images', () => {
+  for (const text of ['Hình túi ruou', 'Gửi hình túi rượu cho anh xem', 'Cho xem ảnh túi rượu']) {
+    assert.equal(__test.isExplicitProductMediaRequest(text), true);
+    const rules = __test.getMatchedProductMediaRules(text);
+    assert.ok(rules.length > 0, `expected media rule for: ${text}`);
+    assert.ok(rules.some((rule) => rule.name === 'anh-san-pham'));
+  }
+});
+
+test('Vietnamese pronoun anh alone is not mistaken for an image request', () => {
+  for (const text of ['Cho anh 4 can 5L', 'Anh muốn mua rượu', 'Gửi cho anh nhé']) {
+    assert.equal(__test.isExplicitProductMediaRequest(text), false, text);
+  }
+});
+
+test('media selector sends only the exact requested product and at most two images', () => {
+  const tam = __test.selectProductMediaImagePaths('Gửi ảnh rượu tam giác mạch');
+  assert.deepEqual(tam, ['tam-giac-mach-product.jpg', 'tam-giac-mach-ingredient.jpg']);
+  assert.ok(tam.length <= 2);
+
+  const ngo = __test.selectProductMediaImagePaths('Cho xem hình rượu ngô men lá');
+  assert.deepEqual(ngo, ['ngo-men-la-product.jpg', 'ngo-men-la-ingredient.jpg']);
+  assert.ok(ngo.length <= 2);
+});
+
+test('media selector caps every request at two images and prioritizes specific intent', () => {
+  const feedback = __test.selectProductMediaImagePaths('Gửi ảnh feedback khách hàng');
+  assert.equal(feedback.length, 2);
+  assert.ok(feedback.every((path) => path.startsWith('feedback-khach-hang-')));
+
+  assert.deepEqual(
+    __test.selectProductMediaImagePaths('Cho xem ảnh giấy phép sản xuất và giấy kiểm nghiệm'),
+    ['ruou-giay-phep-san-xuat.jpg', 'ruou-giay-kiem-nghiem-ngo-men-la.jpg']
+  );
+  assert.deepEqual(
+    __test.selectProductMediaImagePaths('Gửi ảnh giấy an toàn thực phẩm'),
+    ['ruou-giay-to-an-toan-thuc-pham.jpg']
+  );
+  assert.deepEqual(
+    __test.selectProductMediaImagePaths('Cho xem ảnh đăng ký kinh doanh'),
+    ['ruou-giay-dang-ky-kinh-doanh.jpg']
+  );
+
+  assert.deepEqual(
+    __test.selectProductMediaImagePaths('Cho xem ảnh can 20L'),
+    ['can-20l-packaging.jpg']
+  );
+});
+
+test('request for both products sends one matching product image for each', () => {
+  assert.deepEqual(
+    __test.selectProductMediaImagePaths('Gửi ảnh rượu tam giác mạch và rượu ngô men lá'),
+    ['tam-giac-mach-product.jpg', 'ngo-men-la-product.jpg']
+  );
+});
+
+test('order confirmation includes mandatory transport storage advice', () => {
+  const reply = __test.buildOrderDetailsConfirmationReply({
+    product: 'rượu tam giác mạch - 01 túi 5L',
+    phone: '0332516949',
+    address: 'xã Tân Lập, huyện Bắc Quang, tỉnh Hà Giang',
+    totalAmount: 350000
+  }, { name: 'Pham Triệu' });
+
+  assert.match(reply, /vận chuyển xa.*thời tiết nắng nóng.*rượu bị sốc/is);
+  assert.match(reply, /thoáng mát.*3-4 ngày/is);
+  assert.match(reply, /ngăn mát tủ lạnh.*3-4 tiếng/is);
+});
+
+test('existing-order delivery questions never enter a new-order flow', () => {
+  for (const text of [
+    'Gởi rượu cho anh gần tới chưa em',
+    'Gửi rượu cho anh gần tới chưa em',
+    'Đơn của anh gần đến chưa?',
+    'Hàng gửi tới đâu rồi em?'
+  ]) {
+    assert.equal(__test.isExistingOrderInquiry(text), true);
+    const reply = __test.buildEmergencySalesReply(text);
+    assert.match(reply, /kiểm tra.*tình trạng vận chuyển/is);
+    assert.doesNotMatch(reply, /chốt đơn|lên đơn|2-3 ngày|3-4 ngày/i);
+  }
+});
+
+test('old order history plus a delivery inquiry does not produce a detected order', () => {
+  const pageId = '625538103984936';
+  const customerId = '37318798874431675';
+  const messages = [
+    {
+      id: 'old-customer-order',
+      created_time: '2026-07-22T09:01:10Z',
+      from: { id: customerId, name: 'Phêrô Thảo' },
+      message: 'Gởi cho anh 1 túi 5 lít rượu tam giác mạch uống thử. Về 70 Hoàng Dư Khương phường Cẩm Lệ Đà Nẵng sdt 0903575215'
+    },
+    {
+      id: 'old-page-confirmation',
+      created_time: '2026-07-22T09:03:22Z',
+      from: { id: pageId, name: 'BẢN MỘC' },
+      message: 'Sản phẩm: rượu tam giác mạch - 01 túi 5L\nSĐT: 0903575215\nĐịa chỉ: 70 Hoàng Dư Khương, Cẩm Lệ, Đà Nẵng\nEm chốt đơn.'
+    },
+    {
+      id: 'delivery-question',
+      created_time: '2026-07-23T12:21:19Z',
+      from: { id: customerId, name: 'Phêrô Thảo' },
+      message: 'Gởi rượu cho anh gần tới chưa em'
+    }
+  ];
+
+  const order = __test.detectNewOrderForNotification(pageId, customerId, { name: 'Phêrô Thảo' }, messages, {
+    sourceAt: Date.parse('2026-07-23T12:21:19Z'),
+    sourceMessageId: 'delivery-question'
+  });
+  assert.equal(order, null);
+  assert.equal(__test.shouldConfirmOrderDetailsFromCustomer('Gởi rượu cho anh gần tới chưa em', messages, pageId), false);
+});
+
+test('repeat customer can reuse old phone and address for a new order', () => {
+  const pageId = '625538103984936';
+  const customerId = '26077791635149724';
+  const messages = [
+    {
+      id: 'old-order',
+      created_time: '2026-07-07T00:36:53Z',
+      from: { id: customerId, name: 'Nguyen Son Lam' },
+      message: 'Cho anh 2 túi 5 lít rượu ngô men lá về Khối 4, thị trấn Quỳ Hợp, huyện Quỳ Hợp, Nghệ An, 0965378868'
+    },
+    {
+      id: 'repeat-order',
+      created_time: '2026-07-23T13:55:10Z',
+      from: { id: customerId, name: 'Nguyen Son Lam' },
+      message: 'Cho anh 4 can 5L rượu tam giác mạch này nữa nhé về địa chỉ cũ'
+    }
+  ];
+
+  const order = __test.detectRepeatCustomerOrder(pageId, customerId, { name: 'Nguyen Son Lam' }, messages, {
+    sourceAt: Date.parse('2026-07-23T13:55:10Z'),
+    sourceMessageId: 'repeat-order'
+  });
+  assert.equal(order.phone, '0965378868');
+  assert.match(order.address, /Khối 4.*Quỳ Hợp.*Nghệ An/i);
+  assert.equal(order.product, 'rượu tam giác mạch - 04 can 5L');
+  assert.equal(order.totalAmount, 1320000);
+  const reply = __test.buildOrderDetailsConfirmationReply(order, { name: 'Nguyen Son Lam' });
+  assert.match(reply, /SĐT: 0965378868/i);
+  assert.match(reply, /Địa chỉ:.*Khối 4/is);
+  assert.match(reply, /Tổng tiền: 1\.320\.000đ/i);
 });
 
 test('customer contact details after order quote are detected as an order', () => {
@@ -82,6 +242,9 @@ test('customer contact details after order quote are detected as an order', () =
   const reply = __test.buildOrderDetailsConfirmationReply(order, { name: 'Hoàng Đông' });
   assert.match(reply, /chốt đơn/i);
   assert.match(reply, /203\/2 nguyên tri phương/i);
+  assert.match(reply, /vận chuyển xa.*thời tiết nắng nóng.*rượu bị sốc/is);
+  assert.match(reply, /thoáng mát.*3-4 ngày/is);
+  assert.match(reply, /ngăn mát tủ lạnh.*3-4 tiếng/is);
   assert.doesNotMatch(reply, /cần hỏi giá, xem sản phẩm hay đặt/i);
 });
 
@@ -131,7 +294,7 @@ test('order notification waits for bot confirmation and ignores advice as produc
   ];
 
   assert.equal(__test.hasConfirmedOrderMessageAfterCustomer(messagesBeforeConfirm, pageId, customerAt), false);
-  assert.equal(__test.hasConfirmedOrderMessageAfterCustomer(messagesAfterConfirm, pageId, customerAt), true);
+  assert.ok(__test.hasConfirmedOrderMessageAfterCustomer(messagesAfterConfirm, pageId, customerAt));
   assert.equal(__test.extractOrderNotifyProduct(messagesAfterConfirm.map((message) => message.message).join('\n')), 'rượu tam giác mạch - 02 túi 5L');
   assert.equal(__test.isOrderConfirmationPageMessage(confirmationReply), true);
 
@@ -242,10 +405,47 @@ test('order notification preserves mixed product quantities from confirmed produ
   assert.equal(order.totalAmount, 660000);
 });
 
+test('a Page private reply before the latest customer message must not pause the bot', () => {
+  const pageId = '625538103984936';
+  const customerId = '27493564816987972';
+  const customerAt = Date.parse('2026-07-23T14:20:20Z');
+  const messages = [
+    {
+      created_time: '2026-07-23T14:19:46Z',
+      from: { id: pageId },
+      message: 'Em chào anh Quân, không biết anh Quân quan tâm tới sản phẩm nào bên em ạ?'
+    },
+    {
+      created_time: '2026-07-23T14:20:20Z',
+      from: { id: customerId },
+      message: 'R tam giác mạch'
+    }
+  ];
+  assert.equal(__test.getLastManualPageMessageAt(pageId, customerId, messages, customerAt), 0);
+  assert.equal(__test.isAdminPauseRelevantToCustomerMessage(Date.parse('2026-07-23T14:19:46Z'), customerAt), false);
+  assert.equal(__test.isAdminPauseRelevantToCustomerMessage(Date.parse('2026-07-23T14:20:30Z'), customerAt), true);
+});
+
 test('meta ad auto answers do not count as manual page replies', () => {
   assert.equal(__test.isMetaAutoPageMessage('Chào Tôi, bạn đang tìm Rượu Tam Giác Mạch Hà Giang chuẩn vị?'), true);
+  assert.equal(__test.isMetaAutoPageMessage('Chào Công Ứng! Chúng tôi có thể giúp gì cho bạn?'), true);
+  assert.equal(__test.isMetaAutoPageMessage('Xin chào Công Ứng! Bạn có thắc mắc nào cần trao đổi thêm với chúng tôi không?'), true);
+  assert.equal(__test.isMetaAutoPageMessage('Your AI agent transferred this chat to you.'), true);
+  assert.equal(__test.isMetaAutoPageMessage('Tác nhân AI đã chuyển đoạn chat này cho bạn.'), true);
   assert.equal(__test.isMetaAutoPageMessage('Rượu Tam Giác Mạch men lá có nồng độ từ 25-28 độ.'), true);
   assert.equal(__test.isMetaAutoPageMessage('Rượu được nấu từ hạt tam giác mạch trồng trên cao nguyên đá, ủ bằng men lá rừng truyền thống và chưng cất thủ công từng mẻ nhỏ.'), true);
+});
+
+test('poll distinguishes the bot reply from a later manual Page reply', () => {
+  const botSentAt = new Date('2026-07-23T10:03:18Z').getTime();
+  assert.equal(
+    __test.isRecordedBotPageMessageAt(new Date('2026-07-23T10:03:17Z').getTime(), botSentAt),
+    true
+  );
+  assert.equal(
+    __test.isRecordedBotPageMessageAt(new Date('2026-07-23T10:04:00Z').getTime(), botSentAt),
+    false
+  );
 });
 
 test('emergency reply treats deferred purchase as follow-up instead of order details request', () => {

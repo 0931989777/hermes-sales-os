@@ -226,7 +226,13 @@ const productMediaRules = [
       "xem anh",
       "xem hinh",
       "co anh khong",
-      "co hinh khong"
+      "co hinh khong",
+      "anh ruou",
+      "hinh ruou",
+      "anh tui ruou",
+      "hinh tui ruou",
+      "anh tui",
+      "hinh tui"
     ],
     imagePaths: [
       "tam-giac-mach-product.jpg",
@@ -436,6 +442,14 @@ async function handleMessengerEvent(event, entryPageId) {
   clearPendingSalesFollowUp(pageId, senderId);
   const customerProfile = await getMessengerProfile(pageId, senderId);
   const imageDescriptions = await describeMessengerImageAttachments(pageId, senderId, imageAttachments);
+  if (imageDescriptions.length > 0) {
+    messengerPollState.lastCustomerImageDescriptions = messengerPollState.lastCustomerImageDescriptions || {};
+    messengerPollState.lastCustomerImageDescriptions[getMessengerConversationKey(pageId, senderId)] = {
+      at: Number(event.timestamp || Date.now()),
+      text: imageDescriptions.join("\n")
+    };
+    saveMessengerPollState();
+  }
   const effectiveText = buildMessengerEffectiveText(text, imageDescriptions);
   await maybeNotifyNewOrder(pageId, senderId, customerProfile, [
     { id: messageId, created_time: new Date(event.timestamp || Date.now()).toISOString(), from: { id: senderId }, message: effectiveText }
@@ -756,7 +770,7 @@ async function pollPageConversations(pageId, options = {}) {
   if (!pageId || !pageAccessToken) return;
 
   const url = new URL(`https://graph.facebook.com/${config.graphVersion}/${pageId}/conversations`);
-  url.searchParams.set("fields", "id,updated_time,participants,messages.limit(10){id,created_time,from,to,message}");
+  url.searchParams.set("fields", "id,updated_time,participants,messages.limit(50){id,created_time,from,to,message}");
   url.searchParams.set("limit", String(Math.max(1, config.messengerPollMaxConversations)));
   url.searchParams.set("access_token", pageAccessToken);
 
@@ -867,10 +881,6 @@ async function processPolledConversation(pageId, conversation, options = {}) {
     return;
   }
 
-  messengerPollState.processedConversations = messengerPollState.processedConversations || {};
-  messengerPollState.processedConversations[stateKey] = latestMessageAt;
-  saveMessengerPollState();
-
   try {
     const detectedOrder = await maybeNotifyNewOrder(pageId, customerProfile.id, customerProfile, messages, {
       sourceMessageId: latestMessage.id || `${conversationId}:${latestMessageAt}`,
@@ -880,15 +890,16 @@ async function processPolledConversation(pageId, conversation, options = {}) {
       console.error(`[order-notify] poll notification failed page=${pageId || "unknown"} sender=${customerProfile.id}:`, error);
       return null;
     });
-    const lastManualPageMessageAt = getLastManualPageMessageAt(pageId, customerProfile.id, messages);
+    const lastManualPageMessageAt = getLastManualPageMessageAt(pageId, customerProfile.id, messages, latestMessageAt);
     if (lastManualPageMessageAt > 0) {
       markMessengerAdminPaused(pageId, customerProfile.id, lastManualPageMessageAt);
     }
-    if (isMessengerAdminPaused(pageId, customerProfile.id, now)) {
+    if (isMessengerAdminPaused(pageId, customerProfile.id, now, latestMessageAt)) {
       console.log(`[messenger-poll] skipped admin-paused conversation page=${pageId} sender=${customerProfile.id}`);
       return;
     }
     if (shouldSkipAutoReplyForClosingText(text)) {
+      markPolledConversationProcessed(stateKey, latestMessageAt);
       console.log(`[messenger-poll] skipped closing customer text page=${pageId} sender=${customerProfile.id}`);
       return;
     }
@@ -900,6 +911,7 @@ async function processPolledConversation(pageId, conversation, options = {}) {
         const askPhoneAgain = `Dạ anh/chị cho em xin lại số điện thoại ạ. Số anh/chị vừa gửi có vẻ chưa đúng (cần đủ 10 số ạ).`;
         console.log(`[messenger-poll] invalid phone detected, asking again page=${pageId} sender=${customerProfile.id}`);
         await safeSendMessengerText(pageId, customerProfile.id, askPhoneAgain, "messenger-poll");
+        markPolledConversationProcessed(stateKey, latestMessageAt);
         return;
       }
       const confirmationReply = buildOrderDetailsConfirmationReply(detectedOrder, customerProfile);
@@ -910,6 +922,7 @@ async function processPolledConversation(pageId, conversation, options = {}) {
       messengerPollState.lastOrderConfirmations[`order-confirm:${pageId}:${customerProfile.id}`] = Date.now();
       saveMessengerPollState();
       if (await shouldSkipMessengerReplyBecausePageAnswered(pageId, customerProfile.id, latestMessageAt)) {
+        markPolledConversationProcessed(stateKey, latestMessageAt);
         console.log(`[messenger-poll] skipped sending order confirmation because page answered during processing page=${pageId} sender=${customerProfile.id}`);
         return;
       }
@@ -931,6 +944,7 @@ async function processPolledConversation(pageId, conversation, options = {}) {
       });
       clearPendingMessengerRetry(pageId, conversationId, customerProfile.id);
       clearPendingSalesFollowUp(pageId, customerProfile.id);
+      markPolledConversationProcessed(stateKey, latestMessageAt);
       console.log(`[messenger-poll] sent order confirmation page=${pageId} recipient=${customerProfile.id}`);
       return;
     }
@@ -943,6 +957,7 @@ async function processPolledConversation(pageId, conversation, options = {}) {
     const normalizedReply = normalizeCustomerAddressing(reply, customerProfile) || "Minh chua co cau tra loi phu hop luc nay.";
     const safeReply = filterUnsafeReplyContent(normalizedReply, customerProfile.id, pageId);
     if (await shouldSkipMessengerReplyBecausePageAnswered(pageId, customerProfile.id, latestMessageAt)) {
+      markPolledConversationProcessed(stateKey, latestMessageAt);
       console.log(`[messenger-poll] skipped sending OpenClaw reply because page answered during processing page=${pageId} sender=${customerProfile.id}`);
       return;
     }
@@ -950,6 +965,7 @@ async function processPolledConversation(pageId, conversation, options = {}) {
     await sendProductMediaForMessage(pageId, customerProfile.id, text);
     maybeScheduleSalesFollowUp(pageId, customerProfile.id, customerProfile, text, latestMessageAt);
     clearPendingMessengerRetry(pageId, conversationId, customerProfile.id);
+    markPolledConversationProcessed(stateKey, latestMessageAt);
     console.log(`[messenger-poll] sent fallback OpenClaw reply page=${pageId} recipient=${customerProfile.id} chars=${safeReply.length}`);
   } catch (error) {
     const isPermanentSendFailure = isPermanentMessengerSendError(error);
@@ -963,6 +979,12 @@ async function processPolledConversation(pageId, conversation, options = {}) {
     activeMessengerSenders.delete(activeKey);
     await sendSenderAction(pageId, customerProfile.id, "typing_off").catch(() => {});
   }
+}
+
+function markPolledConversationProcessed(stateKey, latestMessageAt) {
+  messengerPollState.processedConversations = messengerPollState.processedConversations || {};
+  messengerPollState.processedConversations[stateKey] = Number(latestMessageAt || Date.now());
+  saveMessengerPollState();
 }
 
 function getActiveMessengerSenderKey(pageId, senderId) {
@@ -991,16 +1013,27 @@ function markMessengerAdminPaused(pageId, recipientId, sourceAt = Date.now()) {
   console.log(`[messenger] admin pause page=${pageId || "unknown"} recipient=${recipientId} until=${new Date(pauseUntil).toISOString()}`);
 }
 
-function isMessengerAdminPaused(pageId, recipientId, now = Date.now()) {
+function isMessengerAdminPaused(pageId, recipientId, now = Date.now(), latestCustomerMessageAt = 0) {
   const key = getMessengerConversationKey(pageId, recipientId);
   const pause = messengerPollState.adminPauses?.[key];
   if (!pause) return false;
 
+  if (!isAdminPauseRelevantToCustomerMessage(pause.sourceAt, latestCustomerMessageAt)) {
+    delete messengerPollState.adminPauses[key];
+    saveMessengerPollState();
+    return false;
+  }
   if (Number(pause.pauseUntil || 0) > now) return true;
 
   delete messengerPollState.adminPauses[key];
   saveMessengerPollState();
   return false;
+}
+
+function isAdminPauseRelevantToCustomerMessage(pauseSourceAt, latestCustomerMessageAt) {
+  const pauseAt = Number(pauseSourceAt || 0);
+  const customerAt = Number(latestCustomerMessageAt || 0);
+  return !customerAt || pauseAt > customerAt;
 }
 
 function recordMessengerBotSent(pageId, recipientId, sentAt = Date.now()) {
@@ -1130,16 +1163,31 @@ function isRecentBotSent(pageId, recipientId, compareAt = Date.now()) {
   return Math.abs(Number(compareAt || Date.now()) - sentAt) <= toleranceMs || Date.now() - sentAt <= toleranceMs;
 }
 
-function getLastManualPageMessageAt(pageId, recipientId, messages) {
+function getLastManualPageMessageAt(pageId, recipientId, messages, latestCustomerMessageAt = 0) {
   const cutoff = Date.now() - getAdminPauseMs();
+  const recordedBotSentAt = Number(
+    messengerPollState.botSentMessages?.[getMessengerConversationKey(pageId, recipientId)] || 0
+  );
   return Math.max(
     0,
     ...messages
       .filter((message) => String(message?.from?.id || "") === String(pageId))
       .filter((message) => !isMetaAutoPageMessage(message?.message || ""))
+      .filter((message) => !isRecordedBotPageMessageAt(
+        new Date(message.created_time).getTime(),
+        recordedBotSentAt
+      ))
       .map((message) => new Date(message.created_time).getTime())
       .filter((createdAt) => createdAt >= cutoff)
+      .filter((createdAt) => isAdminPauseRelevantToCustomerMessage(createdAt, latestCustomerMessageAt))
   );
+}
+
+function isRecordedBotPageMessageAt(messageCreatedAt, recordedBotSentAt) {
+  const createdAt = Number(messageCreatedAt || 0);
+  const sentAt = Number(recordedBotSentAt || 0);
+  if (!createdAt || !sentAt) return false;
+  return Math.abs(createdAt - sentAt) <= 15 * 1000;
 }
 
 function isMetaAutoPageMessage(text) {
@@ -1151,7 +1199,10 @@ function isMetaAutoPageMessage(text) {
 
   return (
     normalized.includes("da tra loi mot quang cao") ||
+    normalized === "your ai agent transferred this chat to you" ||
+    normalized === "tac nhan ai da chuyen doan chat nay cho ban" ||
     /^chao\s+\S+.*chung toi co the giup gi cho ban$/u.test(normalized) ||
+    /^xin chao\s+\S+.*ban co thac mac nao can trao doi them voi chung toi khong$/u.test(normalized) ||
     /^chao\s+\S+.*ban dang tim ruou tam giac mach ha giang chuan vi$/u.test(normalized) ||
     /^ruou tam giac mach men la co nong do tu 25\s*28 do$/u.test(normalized) ||
     /^ruou tam giac mach.*\b25\s*28 do\b/u.test(normalized) ||
@@ -1239,6 +1290,9 @@ function isOrderConfirmationPageMessage(text) {
 }
 
 function detectNewOrderForNotification(pageId, recipientId, customerProfile, messages, options = {}) {
+  const repeatOrder = detectRepeatCustomerOrder(pageId, recipientId, customerProfile, messages, options);
+  if (repeatOrder) return repeatOrder;
+
   const recentMessages = (messages || [])
     .filter((message) => message?.created_time && typeof message.message === "string")
     .sort((a, b) => new Date(a.created_time) - new Date(b.created_time))
@@ -1252,11 +1306,20 @@ function detectNewOrderForNotification(pageId, recipientId, customerProfile, mes
 
   // Only use RECENT customer messages for order detection (within last 10 minutes)
   // This prevents old order data from triggering false confirmations
-  const tenMinAgo = Date.now() - 10 * 60 * 1000;
+  // Anchor recency to the event being processed, not the wall clock. This keeps
+  // delayed webhook/poll replays deterministic and prevents valid order details
+  // from becoming "old" merely because processing was retried later.
+  const recencyAnchor = Number(options.sourceAt || Date.now());
+  const tenMinAgo = recencyAnchor - 10 * 60 * 1000;
   const recentCustomerMessages = customerMessages.filter(
     (message) => new Date(message.created_time).getTime() >= tenMinAgo
   );
   const recentCustomerText = recentCustomerMessages.map((message) => message.message).join("\n");
+
+  // A delivery-status question can coexist with old phone/address/product data
+  // in the same conversation. It must never be interpreted as a new order.
+  const latestCustomerText = String(customerMessages.at(-1)?.message || "");
+  if (isExistingOrderInquiry(latestCustomerText)) return null;
 
   const phones = extractPhonesFromText(allCustomerText);
   const address = cleanOrderNotifyAddress(extractDetailedAddressLinesFromText(allCustomerText).at(-1) || "");
@@ -1292,21 +1355,57 @@ function detectNewOrderForNotification(pageId, recipientId, customerProfile, mes
   };
 }
 
+function detectRepeatCustomerOrder(pageId, recipientId, customerProfile, messages, options = {}) {
+  const ordered = (messages || [])
+    .filter((message) => message?.created_time && typeof message.message === "string")
+    .sort((a, b) => new Date(a.created_time) - new Date(b.created_time));
+  const customerMessages = ordered.filter((message) => String(message?.from?.id || "") !== String(pageId));
+  const latest = customerMessages.at(-1);
+  if (!latest) return null;
+
+  const latestText = String(latest.message || "");
+  const normalized = normalizeSearchText(latestText);
+  if (!/\b(dia chi cu|dia chi nhu cu|gui ve cho cu|giao ve cho cu)\b/u.test(normalized)) return null;
+  if (!/\b(cho|lay|dat|gui|giao|them)\b/u.test(normalized)) return null;
+
+  const previousCustomerText = customerMessages.slice(0, -1).map((message) => message.message).join("\n");
+  const phones = extractPhonesFromText(previousCustomerText);
+  const address = cleanOrderNotifyAddress(extractDetailedAddressLinesFromText(previousCustomerText).at(-1) || "");
+  const recentImage = messengerPollState.lastCustomerImageDescriptions?.[getMessengerConversationKey(pageId, recipientId)];
+  const sourceAt = Number(options.sourceAt || new Date(latest.created_time).getTime() || Date.now());
+  const imageText = recentImage && sourceAt - Number(recentImage.at || 0) <= 24 * 60 * 60 * 1000
+    ? String(recentImage.text || "")
+    : "";
+  const product = extractOrderNotifyProduct(`${latestText}\n${imageText}`);
+  const quantity = parseOrderNotifyQuantity(latestText);
+  const productName = extractOrderNotifyProductNames(product).find((name) => name !== "rượu") || "";
+  if (phones.length === 0 || !address || !productName || !quantity) return null;
+
+  const normalizedProduct = `${productName} - ${formatOrderNotifyQuantity(quantity)}`;
+  const productAmount = estimateOrderNotifyProductAmount(quantity);
+  const shippingAmount = estimateOrderNotifyShippingAmount(quantity, productAmount);
+  return {
+    pageId,
+    pageName: pageNameFallbacks.get(String(pageId)) || `Page ${pageId || "unknown"}`,
+    recipientId,
+    customerName: customerProfile?.name || latest?.from?.name || "Khách",
+    product: normalizedProduct,
+    phone: phones.at(-1),
+    address,
+    productAmount,
+    shippingAmount,
+    totalAmount: productAmount + shippingAmount,
+    sourceAt,
+    sourceMessageId: options.sourceMessageId || latest.id || "",
+    signatureDate: formatOrderNotifyDateKey(sourceAt)
+  };
+}
+
 function shouldConfirmOrderDetailsFromCustomer(text, messages, pageId) {
   const customerText = String(text || "");
 
   // Customer is asking about EXISTING order — NOT a new order
-  const normalizedCustomer = normalizeSearchText(customerText);
-  const isOrderInquiry = [
-    /\b(lau the|chua toi|chua nhan|chua thay|bao gio|khi nao|den noi|sao chua|van chua)\b/u,
-    /\b(don hang|giao hang|ship)\s+(cua|anh|chi|em|minh)\b/u,
-    /\b(hang|cua anh|cua chi)\s+(lau|chua|sao)\b/u,
-  ].some((p) => p.test(normalizedCustomer));
-
-  // Customer is complaining about delivery — treat as after-sales, not new order
-  if (isOrderInquiry && normalizedCustomer.length < 100) {
-    return false;
-  }
+  if (isExistingOrderInquiry(customerText)) return false;
 
   // DON'T re-confirm if we already confirmed for this customer recently (within 5 minutes)
   const senderId = messages?.[0]?.from?.id;
@@ -1359,6 +1458,30 @@ function shouldConfirmOrderDetailsFromCustomer(text, messages, pageId) {
   return customerGaveContactDetails && pageAskedForOrderDetails;
 }
 
+function isExistingOrderInquiry(text) {
+  const normalized = normalizeSearchText(String(text || ""))
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  if (!normalized || normalized.length >= 140) return false;
+
+  // Future/deferred purchase language is not an existing-order inquiry.
+  if (/\b(de sau|mua sau|lay sau|chua mua|chua lay|chua dat|khi nao lay.*(cho dia chi|bao|nhan)|cho dia chi sau)\b/u.test(normalized)) {
+    return false;
+  }
+
+  const hasDeliverySubject = /\b(don|don hang|hang|ruou|goi hang|kien hang)\b/u.test(normalized);
+  const hasDeliveryVerb = /\b(gui|goi|giao|ship|van chuyen)\b/u.test(normalized);
+  const hasStatusQuestion = [
+    /\b(lau the|chua toi|gan toi|gan den|chua den|chua nhan|chua thay|bao gio|khi nao|den noi|toi dau|den dau|sao chua|van chua)\b/u,
+    /\b(tinh trang|hanh trinh|ma van don)\b/u,
+    /\b(don hang|giao hang|ship)\s+(cua|anh|chi|em|minh)\b/u,
+    /\b(hang|ruou|cua anh|cua chi)\s+(lau|chua|sao|gan|toi|den)\b/u
+  ].some((pattern) => pattern.test(normalized));
+
+  return hasStatusQuestion && (hasDeliverySubject || hasDeliveryVerb);
+}
+
 function buildOrderDetailsConfirmationReply(order, customerProfile = {}) {
   const customerShortName = extractCustomerShortName(customerProfile);
   const greetingName = customerShortName ? `Anh ${customerShortName}` : "Anh/chị";
@@ -1374,6 +1497,8 @@ function buildOrderDetailsConfirmationReply(order, customerProfile = {}) {
   }
   lines.push("");
   lines.push("Em chốt đơn và chuyển bộ phận đóng hàng/giao hàng cho mình nhé. Bên em lưu địa chỉ rõ để tránh thất lạc đơn và giúp đơn hàng được giao tới tay mình nhanh hơn ạ.");
+  lines.push("");
+  lines.push(`Em lưu ý thêm: do vận chuyển xa và thời tiết nắng nóng có thể làm rượu bị sốc, khi nhận hàng ${greetingName} chưa nên dùng ngay. Mình để rượu ở nơi thoáng mát 3-4 ngày, hoặc để ngăn mát tủ lạnh 3-4 tiếng trước khi dùng sẽ ngon hơn ạ.`);
   return lines.join("\n");
 }
 
@@ -1551,6 +1676,11 @@ function parseOrderNotifyQuantity(text) {
     }
   }
   const volume = match[3] ? `${match[3]}L` : unit === "túi" ? "5L" : unit === "can" ? "20L" : "";
+  // Customers often call the 5L bag/packaging a "can 5L". Price it as the
+  // 5L product, while preserving their wording in the confirmation.
+  if (unit === "can" && volume === "5L") {
+    return { amount: adjustedAmount, unit: "can", volume, priceUnit: "5L" };
+  }
   return { amount: adjustedAmount, unit, volume };
 }
 
@@ -1569,6 +1699,7 @@ function estimateOrderNotifyProductAmount(quantityOrQuantities) {
   const quantities = Array.isArray(quantityOrQuantities) ? quantityOrQuantities : [quantityOrQuantities].filter(Boolean);
   if (quantities.length === 0) return 0;
   return quantities.reduce((total, quantity) => {
+    if (quantity.priceUnit === "5L" || quantity.volume === "5L") return total + quantity.amount * 330000;
     if (quantity.unit === "can") return total + quantity.amount * 1200000;
     if (quantity.unit === "túi") return total + quantity.amount * 330000;
     return total;
@@ -1579,9 +1710,9 @@ function estimateOrderNotifyShippingAmount(quantityOrQuantities, productAmount) 
   const quantities = Array.isArray(quantityOrQuantities) ? quantityOrQuantities : [quantityOrQuantities].filter(Boolean);
   if (quantities.length === 0 || !productAmount) return 0;
   const totalBags = quantities
-    .filter((quantity) => quantity.unit === "túi")
+    .filter((quantity) => quantity.unit === "túi" || quantity.volume === "5L")
     .reduce((total, quantity) => total + quantity.amount, 0);
-  const hasOtherUnits = quantities.some((quantity) => quantity.unit !== "túi");
+  const hasOtherUnits = quantities.some((quantity) => quantity.unit !== "túi" && quantity.volume !== "5L");
   if (!hasOtherUnits && totalBags === 1) return 20000;
   return 0;
 }
@@ -1788,7 +1919,7 @@ async function fetchRecentMessengerConversationForUser(pageId, recipientId) {
 
   const url = new URL(`https://graph.facebook.com/${config.graphVersion}/${pageId}/conversations`);
   url.searchParams.set("user_id", recipientId);
-  url.searchParams.set("fields", "id,messages.limit(10){id,created_time,from,message}");
+  url.searchParams.set("fields", "id,messages.limit(50){id,created_time,from,message}");
   url.searchParams.set("access_token", pageAccessToken);
 
   const response = await fetch(url);
@@ -1921,15 +2052,13 @@ async function sendProductMediaForMessage(pageId, recipientId, text) {
     return;
   }
 
-  const matchedRules = getMatchedProductMediaRules(text);
-  if (matchedRules.length === 0) {
+  const imagePaths = selectProductMediaImagePaths(text);
+  if (imagePaths.length === 0) {
     console.log(`[messenger-media] skipped because image request is not a product/legal/feedback request page=${pageId || "unknown"} recipient=${recipientId}`);
     return;
   }
-  for (const rule of matchedRules) {
-    for (const imagePath of selectRuleImagePaths(rule)) {
-      await sendMessengerImage(pageId, recipientId, buildAssetUrl(imagePath));
-    }
+  for (const imagePath of imagePaths) {
+    await sendMessengerImage(pageId, recipientId, buildAssetUrl(imagePath));
   }
 }
 
@@ -1940,9 +2069,12 @@ function isExplicitProductMediaRequest(text) {
     .trim();
   if (!normalized) return false;
 
+  // `anh` after accent removal is ambiguous: it can mean Vietnamese pronoun
+  // "anh" or image "ảnh". Never treat `anh` alone as media intent; require
+  // an image object after it (e.g. "ảnh túi rượu") or an unambiguous term.
   return [
-    /\b(anh|hinh|hinh anh|photo|picture|pic)\b/u,
-    /\b(gui|cho|xin|xem|co)\s+(anh|hinh|hinh anh|photo|picture|pic)\b/u,
+    /\b(hinh|hinh anh|photo|picture|pic)\b/u,
+    /\b(gui|cho|xin|xem|co)\s+(hinh|hinh anh|photo|picture|pic)\b/u,
     /\b(cho xem|xem thu|xem mau|xem san pham|xem hang|xem can|xem tui)\b/u,
     /\b(anh|hinh)\s+(san pham|ruou|tui|can|giay to|giay phep|kiem nghiem|feedback|khach hang)\b/u
   ].some((pattern) => pattern.test(normalized));
@@ -1966,6 +2098,36 @@ function getMatchedProductMediaRules(text) {
   return productMediaRules.filter((rule) =>
     rule.matches.some((phrase) => normalizedText.includes(phrase))
   );
+}
+
+function selectProductMediaImagePaths(text) {
+  const rules = getMatchedProductMediaRules(text);
+  const byName = new Map(rules.map((rule) => [rule.name, rule]));
+  const pick = (name, limit = 2) => selectRuleImagePaths(byName.get(name) || {}).slice(0, limit);
+
+  // Narrow requests always win over generic words such as "gửi ảnh".
+  if (byName.has("ruou-giay-to")) {
+    const normalized = normalizeSearchText(text);
+    const requestedLegalImages = [];
+    if (/\b(giay phep|giay phep san xuat)\b/u.test(normalized)) requestedLegalImages.push("ruou-giay-phep-san-xuat.jpg");
+    if (/\b(kiem nghiem|phieu kiem nghiem|ket qua thu nghiem)\b/u.test(normalized)) requestedLegalImages.push("ruou-giay-kiem-nghiem-ngo-men-la.jpg");
+    if (/\b(an toan thuc pham)\b/u.test(normalized)) requestedLegalImages.push("ruou-giay-to-an-toan-thuc-pham.jpg");
+    if (/\b(dang ky kinh doanh)\b/u.test(normalized)) requestedLegalImages.push("ruou-giay-dang-ky-kinh-doanh.jpg");
+    return requestedLegalImages.length > 0 ? [...new Set(requestedLegalImages)].slice(0, 2) : pick("ruou-giay-to", 2);
+  }
+  for (const name of ["can-20l-packaging", "feedback-khach-hang"]) {
+    if (byName.has(name)) return pick(name, 2);
+  }
+
+  const wantsTamGiacMach = byName.has("tam-giac-mach");
+  const wantsNgoMenLa = byName.has("ngo-men-la");
+  if (wantsTamGiacMach && wantsNgoMenLa) {
+    return [pick("tam-giac-mach", 1)[0], pick("ngo-men-la", 1)[0]].filter(Boolean);
+  }
+  if (wantsTamGiacMach) return pick("tam-giac-mach", 2);
+  if (wantsNgoMenLa) return pick("ngo-men-la", 2);
+  if (byName.has("anh-san-pham")) return pick("anh-san-pham", 2);
+  return [];
 }
 
 async function getRecentMessengerConversationHistory(pageId, recipientId, fallbackMessages = []) {
@@ -2253,12 +2415,21 @@ function buildEmergencySalesReply(text, options = {}) {
   const defersPurchase = /\b(de sau|de tet|tet mua|chua lay|chua mua|chua can|chua dat|khi nao lay|luc nao lay|bao sau|mua sau|lay sau|de khi nao|chua lay dau|chua lay dau e)\b/u.test(normalized);
   const orderIntent = /\b(mua|lay|dat|chot|ship|gui|len don|cho em|cho anh|cho chi)\b/u.test(normalized);
   const asksQuality = /\b(ngon|dau dau|nhuc dau|chat luong|dam bao|co dau dau|khong dau dau|ko dau dau|k dau dau)\b/u.test(normalized);
+  const asksAldehydeTreatment = /\b(andehit|an de hit|andehyde|aldehit|aldehyde)\b/u.test(normalized);
   const asksTaste = /\b(vi|huong|huong vi|mui|thom|hau|em|gat|nong|de uong|uong the nao|nhu the nao)\b/u.test(normalized);
   const complainsContext = /\b(xem tu tren|tra loi theo dong|doc lai|lon xon|lung tung|khong dung|ko dung|k dung)\b/u.test(normalized);
   const mentionsTamGiacMach = /\b(tam giac mach|mach)\b/u.test(combined);
   const mentionsNgo = /\b(ngo|ngo men la|ruou ngo)\b/u.test(combined);
   const mentionsProduct = /\b(ruou|ngo|men la|tam giac mach|ban moc)\b/u.test(normalized);
   const orderSignal = detectEmergencyOrderSignal(text, normalized);
+
+  if (isExistingOrderInquiry(text)) {
+    return "Dạ em nhận được yêu cầu kiểm tra đơn của anh/chị rồi ạ. Em sẽ kiểm tra lại tình trạng vận chuyển và phản hồi mình sớm nhất có thể; em chưa hẹn chính xác ngày nhận khi chưa có thông tin từ đơn vị vận chuyển ạ.";
+  }
+
+  if (asksAldehydeTreatment) {
+    return "Dạ rượu bên em đã được lọc, khử andehit và trải qua quá trình lão hóa rồi ạ.";
+  }
 
   if (asksColor) {
     return [
@@ -3366,7 +3537,13 @@ export const __test = {
   extractOrderNotifyProduct,
   isOrderConfirmationPageMessage,
   isMetaAutoPageMessage,
+  isRecordedBotPageMessageAt,
+  getLastManualPageMessageAt,
+  isAdminPauseRelevantToCustomerMessage,
+  isExistingOrderInquiry,
+  detectRepeatCustomerOrder,
   isExplicitProductMediaRequest,
   shouldConfirmOrderDetailsFromCustomer,
-  getMatchedProductMediaRules
+  getMatchedProductMediaRules,
+  selectProductMediaImagePaths
 };

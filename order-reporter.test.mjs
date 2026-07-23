@@ -71,6 +71,38 @@ test('3: multi-product order shows each product on its own line', () => {
   console.log('Report:', report);
 });
 
+test('confirmed message is the single source of truth for Telegram report', () => {
+  const messages = [
+    { created_time: '2026-07-23T13:55:10Z', from: { id: '26077791635149724', name: 'Nguyen Son Lam' }, message: 'Cho anh 4 can này nữa nhé về địa chỉ cũ', id: 'm1' },
+    { created_time: '2026-07-23T14:33:00Z', from: { id: 'page1' }, message: [
+      'Dạ em xin xác nhận lại đơn của Anh Lam ạ.',
+      '',
+      '• Sản phẩm: rượu tam giác mạch - 04 can 5L',
+      '• SĐT: 0965378868',
+      '• Địa chỉ: Khối 4, thị trấn Quỳ Hợp, huyện Quỳ Hợp, Nghệ An',
+      '• Phí ship: 0đ',
+      '• Tổng tiền: 1.320.000đ',
+      '',
+      'Em chốt đơn và chuyển bộ phận đóng hàng/giao hàng cho mình ạ.'
+    ].join('\n'), id: 'm2' }
+  ];
+
+  const order = detectOrder('page1', '26077791635149724', { name: 'Nguyen Son Lam' }, messages, {
+    confirmed: true,
+    sourceAt: Date.parse('2026-07-23T13:55:10Z')
+  });
+  assert.ok(order);
+  assert.equal(order.product, 'rượu tam giác mạch - 04 can 5L');
+  assert.equal(order.phone, '0965378868');
+  assert.equal(order.address, 'Khối 4, thị trấn Quỳ Hợp, huyện Quỳ Hợp, Nghệ An');
+  assert.equal(order.shippingAmount, 0);
+  assert.equal(order.totalAmount, 1320000);
+  const report = formatTelegramReport(order);
+  assert.match(report, /Tổng tiền: 1\.320\.000đ/);
+  assert.match(report, /Địa chỉ: Khối 4, thị trấn Quỳ Hợp, huyện Quỳ Hợp, Nghệ An/);
+  assert.doesNotMatch(report, /4\.800\.000đ|Địa chỉ: cũ/);
+});
+
 test('4: customer changes quantity -> uses final confirmed version', () => {
   const messages = [
     { created_time: '2026-07-15T10:00:00Z', from: { id: '123', name: 'Khach D' }, message: 'Cho anh 2 túi ngô', id: 'm1' },

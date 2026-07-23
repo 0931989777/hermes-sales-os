@@ -41,10 +41,78 @@ agent:
   reasoning_effort: medium
   verbose: false
 auxiliary:
+  approval:
+    api_key: ''
+    base_url: http://173.212.241.127:20128/v1
+    fallback_chain: []
+    model: HermesBM
+    provider: custom
+  compression:
+    api_key: ''
+    base_url: http://173.212.241.127:20128/v1
+    fallback_chain: []
+    model: HermesBM
+    provider: custom
+  curator:
+    api_key: ''
+    base_url: http://173.212.241.127:20128/v1
+    fallback_chain: []
+    model: HermesBM
+    provider: custom
+  kanban_decomposer:
+    api_key: ''
+    base_url: http://173.212.241.127:20128/v1
+    fallback_chain: []
+    model: HermesBM
+    provider: custom
+  mcp:
+    api_key: ''
+    base_url: http://173.212.241.127:20128/v1
+    fallback_chain: []
+    model: HermesBM
+    provider: custom
+  profile_describer:
+    api_key: ''
+    base_url: http://173.212.241.127:20128/v1
+    fallback_chain: []
+    model: HermesBM
+    provider: custom
+  skills_hub:
+    api_key: ''
+    base_url: http://173.212.241.127:20128/v1
+    fallback_chain: []
+    model: HermesBM
+    provider: custom
+  title_generation:
+    api_key: ''
+    base_url: http://173.212.241.127:20128/v1
+    fallback_chain: []
+    model: HermesBM
+    provider: custom
+  triage_specifier:
+    api_key: ''
+    base_url: http://173.212.241.127:20128/v1
+    fallback_chain: []
+    model: HermesBM
+    provider: custom
+  tts_audio_tags:
+    api_key: ''
+    base_url: http://173.212.241.127:20128/v1
+    fallback_chain: []
+    model: HermesBM
+    provider: custom
   vision:
-    api_key: local-key
-    base_url: http://127.0.0.1:20128/v1
-    model: openrouter/google/gemma-4-26b-a4b-it:free
+    api_key: ''
+    base_url: http://173.212.241.127:20128/v1
+    fallback_chain: []
+    model: HermesBM
+    provider: custom
+  web_extract:
+    api_key: ''
+    base_url: http://173.212.241.127:20128/v1
+    fallback_chain: []
+    model: HermesBM
+    provider: custom
 browser:
   cloud_provider: local
   use_gateway: false
@@ -55,6 +123,9 @@ command_allowlist:
 - execute_code
 - script execution via -e/-c flag
 - stop/restart system service
+cron:
+  mirror_delivery: false
+  wrap_response: false
 curator:
   deliver: local
 custom_providers:

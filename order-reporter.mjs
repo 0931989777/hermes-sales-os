@@ -360,7 +360,79 @@ export function estimateOrderNotifyShippingAmount(quantityOrQuantities, productA
 
 // ── Order Detection ──────────────────────────────────────────────────────────
 
+function extractConfirmedField(text, fieldPattern) {
+  const line = String(text || "")
+    .split(/\r?\n/u)
+    .map((value) => stripOrderNotifyLinePrefix(value))
+    .find((value) => fieldPattern.test(value));
+  if (!line) return "";
+  return line.replace(fieldPattern, "").trim();
+}
+
+function parseConfirmedMoney(text, fieldPattern) {
+  const value = extractConfirmedField(text, fieldPattern);
+  const digits = value.replace(/\D/gu, "");
+  return digits ? Number.parseInt(digits, 10) : 0;
+}
+
+function detectOrderFromLatestConfirmation(pageId, customerId, customerProfile, messages, options = {}) {
+  const sourceAt = Number(options.sourceAt || 0);
+  const confirmations = (messages || [])
+    .filter((message) => String(message?.from?.id || "") === String(pageId))
+    .filter((message) => {
+      const createdAt = new Date(message?.created_time || 0).getTime();
+      return (!sourceAt || createdAt >= sourceAt) && isOrderConfirmationMessage(message?.message || "");
+    })
+    .sort((a, b) => new Date(a.created_time) - new Date(b.created_time));
+  const confirmation = confirmations.at(-1);
+  if (!confirmation) return null;
+
+  const confirmationText = String(confirmation.message || "");
+  const product = extractOrderNotifyProduct(confirmationText);
+  const phones = extractPhonesFromText(confirmationText);
+  const address = cleanOrderNotifyAddress(extractConfirmedField(
+    confirmationText,
+    /^(địa chỉ|dia chi|đc|dc)\s*[:：-]?\s*/iu
+  ));
+  if (!product || phones.length === 0 || !address) return null;
+
+  const quantities = parseOrderNotifyQuantities(product);
+  const productAmount = estimateOrderNotifyProductAmount(quantities);
+  const explicitShipping = parseConfirmedMoney(confirmationText, /^(phí ship|phi ship)\s*[:：-]?\s*/iu);
+  const explicitTotal = parseConfirmedMoney(confirmationText, /^(tổng tiền|tong tien|tổng|tong)\s*[:：-]?\s*/iu);
+  const shippingAmount = /^(0|miễn phí|mien phi)/iu.test(extractConfirmedField(
+    confirmationText,
+    /^(phí ship|phi ship)\s*[:：-]?\s*/iu
+  )) ? 0 : explicitShipping || estimateOrderNotifyShippingAmount(quantities, productAmount);
+  const pageNameFallbacks = new Map([
+    ["625538103984936", "BẢN MỘC"],
+    ["560889237118933", "Bản Mộc - Hương Vị Tây Bắc"],
+    ["109923292016675", "Bản Mộc - Chuẩn Vị Tây Bắc"],
+    ["606774605862174", "Bản Mộc - Đặc Sản Tây Bắc"]
+  ]);
+  const orderAt = sourceAt || new Date(confirmation.created_time).getTime() || Date.now();
+
+  return {
+    pageId,
+    pageName: pageNameFallbacks.get(String(pageId)) || `Page ${pageId || "unknown"}`,
+    recipientId: customerId,
+    customerName: customerProfile?.name || "Khách",
+    product,
+    phone: phones[0],
+    address,
+    productAmount,
+    shippingAmount,
+    totalAmount: explicitTotal || (productAmount ? productAmount + shippingAmount : 0),
+    sourceAt: orderAt,
+    sourceMessageId: options.sourceMessageId || confirmation.id || "",
+    signatureDate: formatOrderNotifyDateKey(orderAt)
+  };
+}
+
 export function detectOrder(pageId, customerId, customerProfile, messages, options = {}) {
+  const confirmedOrder = detectOrderFromLatestConfirmation(pageId, customerId, customerProfile, messages, options);
+  if (confirmedOrder) return confirmedOrder;
+
   const recentMessages = (messages || [])
     .filter((message) => message?.created_time && typeof message.message === "string")
     .sort((a, b) => new Date(a.created_time) - new Date(b.created_time))
@@ -537,6 +609,9 @@ export async function processOrderNotification(pageId, customerId, customerProfi
     orderState.notifiedOrders[notificationKey] = Date.now();
     orderState.notifiedOrderContacts[contactKey] = Date.now();
     saveOrderState();
+    // A confirmed order supersedes the delayed pending-lead record for the same
+    // customer/contact. Clear it immediately to prevent a later duplicate alert.
+    clearPendingLeadRecord(contactKey);
 
     console.log(`[order-reporter] sent telegram notification page=${pageId || "unknown"} customer=${customerId}`);
     return { notified: true, order };
