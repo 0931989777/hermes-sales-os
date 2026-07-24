@@ -24,13 +24,13 @@ const pageNameFallbacks = new Map([
 ]);
 
 const { start, end, label } = getReportWindow();
-const summaries = [];
-
-for (const pageId of getConfiguredPageIds()) {
-  summaries.push(await summarizePage(pageId));
+if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+  const summaries = [];
+  for (const pageId of getConfiguredPageIds()) {
+    summaries.push(await summarizePage(pageId));
+  }
+  console.log(formatReport(summaries));
 }
-
-console.log(formatReport(summaries));
 
 async function summarizePage(pageId) {
   const pageAccessToken = getPageAccessToken(pageId);
@@ -200,14 +200,14 @@ function formatReport(pageSummaries) {
   return lines.join("\n").trim();
 }
 
-function cleanOrderField(value) {
+export function cleanOrderField(value) {
   if (!value) return "";
   const text = String(value)
     .replace(/^(tổng tiền|tong tien|tổng|tong)\s*[:：]?\s*/iu, "")
     .trim();
-  // Extract just the price portion: first occurrence of number+đ pattern
-  const match = text.match(/[\d.,]+\s*đ\b/u);
-  return match ? match[0] : (/[\d]/.test(text) ? text : "");
+  // Extract only the first money token; never absorb closing prose after the amount.
+  const match = text.match(/\d[\d.,]*\s*đ/u);
+  return match ? match[0].replace(/\s+/gu, "") : "";
 }
 
 function formatOrder(order, index) {
@@ -469,7 +469,7 @@ function isOrderConfirmationMessage(text) {
   return hasStructuredConfirmation || (hasConfirmationPhrase && hasOrderDetails);
 }
 
-function extractConfirmationFields(text) {
+export function extractConfirmationFields(text) {
   const fields = {
     customerName: "",
     product: "",

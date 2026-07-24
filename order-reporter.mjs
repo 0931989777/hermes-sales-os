@@ -317,13 +317,27 @@ function cleanOrderNotifyProduct(value) {
 }
 
 export function parseOrderNotifyQuantity(text) {
-  const match = String(text || "").match(/\b(\d+)\s*(túi|tui|can|l|lit|lít)\b(?:\s*(\d+)\s*(l|lit|lít))?/iu);
+  const match = String(text || "").match(/\b(\d+)\s*(túi|tui|can|l|lit|lít)(?:\s*(\d+)\s*(l|lit|lít))?\b/iu);
   if (!match) return null;
   const amount = Number.parseInt(match[1], 10);
   if (!Number.isFinite(amount) || amount <= 0) return null;
-  const unit = normalizeSearchText(match[2]) === "tui" ? "túi" : normalizeSearchText(match[2]);
-  const volume = match[3] ? `${match[3]}L` : unit === "túi" ? "5L" : "";
-  return { amount, unit, volume };
+  const rawUnit = normalizeSearchText(match[2]);
+  let unit = rawUnit === "tui" ? "túi" : rawUnit;
+  let adjustedAmount = amount;
+  if (["l", "lit"].includes(unit)) {
+    if (amount >= 20) {
+      unit = "can";
+      adjustedAmount = Math.round(amount / 20);
+    } else if (amount === 5) {
+      unit = "túi";
+      adjustedAmount = 1;
+    }
+  }
+  const volume = match[3] ? `${match[3]}L` : unit === "túi" ? "5L" : unit === "can" ? "20L" : "";
+  if (unit === "can" && volume === "5L") {
+    return { amount: adjustedAmount, unit: "can", volume, priceUnit: "5L" };
+  }
+  return { amount: adjustedAmount, unit, volume };
 }
 
 export function parseOrderNotifyQuantities(text) {
@@ -341,6 +355,7 @@ export function estimateOrderNotifyProductAmount(quantityOrQuantities) {
   const quantities = Array.isArray(quantityOrQuantities) ? quantityOrQuantities : [quantityOrQuantities].filter(Boolean);
   if (quantities.length === 0) return 0;
   return quantities.reduce((total, quantity) => {
+    if (quantity.priceUnit === "5L" || quantity.volume === "5L") return total + quantity.amount * 330000;
     if (quantity.unit === "can") return total + quantity.amount * 1200000;
     if (quantity.unit === "túi") return total + quantity.amount * 330000;
     return total;
@@ -351,9 +366,9 @@ export function estimateOrderNotifyShippingAmount(quantityOrQuantities, productA
   const quantities = Array.isArray(quantityOrQuantities) ? quantityOrQuantities : [quantityOrQuantities].filter(Boolean);
   if (quantities.length === 0 || !productAmount) return 0;
   const totalBags = quantities
-    .filter((quantity) => quantity.unit === "túi")
+    .filter((quantity) => quantity.unit === "túi" || quantity.volume === "5L")
     .reduce((total, quantity) => total + quantity.amount, 0);
-  const hasOtherUnits = quantities.some((quantity) => quantity.unit !== "túi");
+  const hasOtherUnits = quantities.some((quantity) => quantity.unit !== "túi" && quantity.volume !== "5L");
   if (!hasOtherUnits && totalBags === 1) return 20000;
   return 0;
 }
@@ -371,8 +386,17 @@ function extractConfirmedField(text, fieldPattern) {
 
 function parseConfirmedMoney(text, fieldPattern) {
   const value = extractConfirmedField(text, fieldPattern);
-  const digits = value.replace(/\D/gu, "");
+  const firstMoney = value.match(/\d[\d.,]*/u)?.[0] || "";
+  const digits = firstMoney.replace(/\D/gu, "");
   return digits ? Number.parseInt(digits, 10) : 0;
+}
+
+function isOrderAddressReference(value) {
+  const normalized = normalizeSearchText(value)
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  return /^(cu|nhu cu|dia chi cu|dia chi nhu cu|cho cu|ve cho cu)$/u.test(normalized);
 }
 
 function detectOrderFromLatestConfirmation(pageId, customerId, customerProfile, messages, options = {}) {
@@ -394,7 +418,7 @@ function detectOrderFromLatestConfirmation(pageId, customerId, customerProfile, 
     confirmationText,
     /^(địa chỉ|dia chi|đc|dc)\s*[:：-]?\s*/iu
   ));
-  if (!product || phones.length === 0 || !address) return null;
+  if (!product || phones.length === 0 || !address || isOrderAddressReference(address)) return null;
 
   const quantities = parseOrderNotifyQuantities(product);
   const productAmount = estimateOrderNotifyProductAmount(quantities);
@@ -446,7 +470,7 @@ export function detectOrder(pageId, customerId, customerProfile, messages, optio
   const phones = extractPhonesFromText(allRecentText);  // Check ALL messages including bot replies
   const address = cleanOrderNotifyAddress(extractDetailedAddressLinesFromText(allCustomerText).at(-1) || "");
   const product = extractOrderNotifyProduct(allRecentText) || extractOrderNotifyProduct(allCustomerText);
-  if (phones.length === 0 || !address || !product) return null;
+  if (phones.length === 0 || !address || isOrderAddressReference(address) || !product) return null;
 
   const pageNameFallbacks = new Map([
     ["625538103984936", "BẢN MỘC"],
@@ -486,6 +510,7 @@ export function getOrderNotificationKey(order) {
     order.pageId,
     order.recipientId,
     order.signatureDate,
+    order.sourceMessageId || "",
     order.phone,
     normalizeSearchText(order.product).replace(/\s+/gu, " ").trim(),
     normalizeSearchText(order.address).replace(/\s+/gu, " ").trim()
@@ -506,10 +531,18 @@ export function getOrderContactKey(order) {
 
 export function isOrderNotified(order) {
   const notificationKey = getOrderNotificationKey(order);
+  if (orderState.notifiedOrders[notificationKey] || activeNotificationKeys.has(notificationKey)) {
+    return true;
+  }
+
+  // Backward compatibility for notifications written before sourceMessageId
+  // became part of the key: suppress only when that notification happened at
+  // or after this source message. A later customer message is a distinct add-on
+  // order even when phone/address/date are unchanged.
   const contactKey = getOrderContactKey(order);
-  const persisted = orderState.notifiedOrders[notificationKey] || orderState.notifiedOrderContacts[contactKey];
-  const active = activeNotificationKeys.has(notificationKey) || activeNotificationKeys.has(contactKey);
-  return Boolean(persisted || active);
+  const contactNotifiedAt = Number(orderState.notifiedOrderContacts[contactKey] || 0);
+  const sourceAt = Number(order.sourceAt || 0);
+  return Boolean(contactNotifiedAt && (!sourceAt || contactNotifiedAt >= sourceAt));
 }
 
 // ── Formatting ───────────────────────────────────────────────────────────────
@@ -599,7 +632,6 @@ export async function processOrderNotification(pageId, customerId, customerProfi
   const notificationKey = getOrderNotificationKey(order);
   const contactKey = getOrderContactKey(order);
   activeNotificationKeys.add(notificationKey);
-  activeNotificationKeys.add(contactKey);
 
   try {
     const reportText = formatTelegramReport(order);
@@ -620,7 +652,6 @@ export async function processOrderNotification(pageId, customerId, customerProfi
     throw error;
   } finally {
     activeNotificationKeys.delete(notificationKey);
-    activeNotificationKeys.delete(contactKey);
   }
 }
 

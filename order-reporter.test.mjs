@@ -71,6 +71,14 @@ test('3: multi-product order shows each product on its own line', () => {
   console.log('Report:', report);
 });
 
+test('quantity parser accepts compact 5L packaging variants consistently', () => {
+  for (const text of ['8 can5 lít', '8 can 5L', '8can5L']) {
+    assert.deepEqual(parseOrderNotifyQuantities(text), [
+      { amount: 8, unit: 'can', volume: '5L', priceUnit: '5L' }
+    ]);
+  }
+});
+
 test('confirmed message is the single source of truth for Telegram report', () => {
   const messages = [
     { created_time: '2026-07-23T13:55:10Z', from: { id: '26077791635149724', name: 'Nguyen Son Lam' }, message: 'Cho anh 4 can này nữa nhé về địa chỉ cũ', id: 'm1' },
@@ -101,6 +109,35 @@ test('confirmed message is the single source of truth for Telegram report', () =
   assert.match(report, /Tổng tiền: 1\.320\.000đ/);
   assert.match(report, /Địa chỉ: Khối 4, thị trấn Quỳ Hợp, huyện Quỳ Hợp, Nghệ An/);
   assert.doesNotMatch(report, /4\.800\.000đ|Địa chỉ: cũ/);
+});
+
+test('confirmed total ignores explanatory shipping amount in parentheses', () => {
+  const messages = [
+    {
+      created_time: '2026-07-24T13:17:00Z',
+      from: { id: 'page1' },
+      id: 'confirm-thuy',
+      message: [
+        'Dạ em xin xác nhận đơn hàng:',
+        '• Sản phẩm: rượu tam giác mạch - 01 túi 5L',
+        '• SĐT: 0399555005',
+        '• Địa chỉ: Số 19, ngách 16, ngõ Hòa Bình 4, phường Minh Khai, quận Hai Bà Trưng, Hà Nội',
+        '• Phí ship: 20.000đ',
+        '• Tổng tiền: 350.000đ (đã gồm phí ship 20.000đ)',
+        'Em chốt đơn và chuyển bộ phận đóng hàng/giao hàng ạ.'
+      ].join('\n')
+    }
+  ];
+
+  const order = detectOrder('page1', 'customer-thuy', { name: 'Nguyễn Thuý' }, messages, {
+    confirmed: true,
+    sourceAt: Date.parse('2026-07-24T13:16:00Z'),
+    sourceMessageId: 'customer-order-thuy'
+  });
+  assert.ok(order);
+  assert.equal(order.shippingAmount, 20000);
+  assert.equal(order.totalAmount, 350000);
+  assert.match(formatTelegramReport(order), /Tổng tiền: 350\.000đ/);
 });
 
 test('4: customer changes quantity -> uses final confirmed version', () => {
@@ -138,6 +175,43 @@ test('5: dedup key is based on page+customer+date+phone+address, not just produc
   const order3 = { ...order1, signatureDate: '2026-07-16' };
   const key3 = getOrderContactKey(order3);
   assert.notEqual(key1, key3, 'different day should produce different key');
+});
+
+test('confirmation with placeholder old address is not a reportable order', () => {
+  const messages = [
+    {
+      id: 'customer-add-on',
+      created_time: '2026-07-24T01:05:57Z',
+      from: { id: 'customer1', name: 'Khach' },
+      message: 'Cho anh thêm 8 can5 lít nữa'
+    },
+    {
+      id: 'bad-confirmation',
+      created_time: '2026-07-24T01:06:25Z',
+      from: { id: 'page1' },
+      message: 'Sản phẩm: rượu tam giác mạch - 04 can 5L\nSĐT: 0965378868\nĐịa chỉ: cũ\nTổng tiền: 4.800.000đ\nEm chốt đơn.'
+    }
+  ];
+
+  assert.equal(detectOrder('page1', 'customer1', { name: 'Khach' }, messages, {
+    confirmed: true,
+    sourceAt: Date.parse('2026-07-24T01:05:57Z'),
+    sourceMessageId: 'customer-add-on'
+  }), null);
+});
+
+test('confirmed add-on orders for the same contact on the same day have distinct source keys', () => {
+  const base = {
+    pageId: 'page1', recipientId: 'cust1', signatureDate: '2026-07-15',
+    phone: '0987654321', address: '123 Đường ABC, Hà Nội',
+    product: 'rượu tam giác mạch - 08 can 5L'
+  };
+  const first = { ...base, sourceMessageId: 'customer-order-1' };
+  const retry = { ...base, sourceMessageId: 'customer-order-1' };
+  const addOn = { ...base, sourceMessageId: 'customer-order-2' };
+
+  assert.equal(getOrderNotificationKey(first), getOrderNotificationKey(retry));
+  assert.notEqual(getOrderNotificationKey(first), getOrderNotificationKey(addOn));
 });
 
 test('6: consultation/description text is not extracted as product', () => {

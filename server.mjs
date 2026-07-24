@@ -21,6 +21,9 @@ import {
   sendDuePendingLeads
 } from "./order-reporter.mjs";
 
+import { extractOrderFromAI as extractOrderFromAIExtractor, validateAIOrder, KNOWN_PRODUCTS as AI_KNOWN_PRODUCTS } from "./ai-order-extractor.mjs";
+import { extractCustomerShortName, mergeStructuredCustomerProfile } from "./customer-name.mjs";
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const workspaceDir = dirname(__dirname);
 loadDotEnv(join(__dirname, ".env"));
@@ -43,6 +46,12 @@ const config = {
   verifyToken: process.env.META_VERIFY_TOKEN || "",
   pageAccessToken: process.env.META_PAGE_ACCESS_TOKEN || "",
   pageAccessTokens: readPageAccessTokens(),
+  disabledMessengerPageIds: new Set(
+    String(process.env.DISABLED_MESSENGER_PAGE_IDS || "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter(Boolean)
+  ),
   appSecret: process.env.META_APP_SECRET || "",
   graphVersion: process.env.META_GRAPH_API_VERSION || "v23.0",
   openclawBaseUrl: stripTrailingSlash(process.env.OPENCLAW_BASE_URL || "http://127.0.0.1:18789"),
@@ -57,8 +66,15 @@ const config = {
   visionTimeoutSeconds: readIntEnv("VISION_TIMEOUT_SECONDS", 45),
   visionMaxImageBytes: readIntEnv("VISION_MAX_IMAGE_BYTES", 5 * 1024 * 1024),
   hermesCliBin: process.env.HERMES_CLI_BIN || "/usr/local/bin/banmoc-hermes-hmbm",
+  hermesDirectBin: process.env.HERMES_DIRECT_BIN || "/home/HMBM/.hermes/hermes-agent/venv/bin/hermes",
+  hermesDirectProvider: process.env.HERMES_DIRECT_PROVIDER || "HermesBM",
+  hermesDirectModel: process.env.HERMES_DIRECT_MODEL || "HermesBM",
   hermesCliTimeoutSeconds: readIntEnv("HERMES_CLI_TIMEOUT_SECONDS", 35),
-  fastSalesReplyEnabled: readBoolEnv("FAST_SALES_REPLY_ENABLED", false),
+  aiOrderExtractionEnabled: readBoolEnv("AI_ORDER_EXTRACTION_ENABLED", false),
+  aiOrderExtractionTimeoutSeconds: readIntEnv("AI_ORDER_EXTRACTION_TIMEOUT_SECONDS", 25),
+  // Fast canned replies cannot understand conversation context or buying intent.
+  // Keep permanently disabled; all customer messages go through HermesBM/order flow.
+  fastSalesReplyEnabled: false,
   maxReplyChars: readIntEnv("MAX_REPLY_CHARS", 1900),
   shopPhone: normalizePhoneValue(process.env.BAN_MOC_HOTLINE || "0931989777"),
   orderNotifyEnabled: readBoolEnv("ORDER_NOTIFY_ENABLED", true),
@@ -406,6 +422,11 @@ async function handleMessengerEvent(event, entryPageId) {
   const messageId = message?.mid || "";
 
   if (!senderId || !message) return;
+  if (config.disabledMessengerPageIds.has(String(pageId))) {
+    if (messageId) markMessengerMessageProcessed(pageId, messageId);
+    console.log(`[messenger] skipped disabled page=${pageId} sender=${senderId}`);
+    return;
+  }
   if (isEcho) {
     handleMessengerEcho(event, pageId);
     return;
@@ -759,7 +780,8 @@ async function pollMainMessengerInboxFallback() {
 }
 
 async function pollConfiguredPagesInboxFallback(pageIds, options = {}) {
-  const uniquePageIds = [...new Set((pageIds || []).filter(Boolean))];
+  const uniquePageIds = [...new Set((pageIds || []).filter(Boolean))]
+    .filter((pageId) => !config.disabledMessengerPageIds.has(String(pageId)));
   for (const pageId of uniquePageIds) {
     await pollPageConversations(pageId, options);
   }
@@ -847,8 +869,10 @@ async function processPolledConversation(pageId, conversation, options = {}) {
     return;
   }
 
-  const customerProfile = getPolledCustomerProfile(pageId, conversation, latestMessage);
-  if (!customerProfile?.id) return;
+  const polledCustomerProfile = getPolledCustomerProfile(pageId, conversation, latestMessage);
+  if (!polledCustomerProfile?.id) return;
+  const structuredCustomerProfile = await getMessengerProfile(pageId, polledCustomerProfile.id).catch(() => null);
+  const customerProfile = mergeStructuredCustomerProfile(polledCustomerProfile, structuredCustomerProfile || {});
   const activeKey = getActiveMessengerSenderKey(pageId, customerProfile.id);
   if (activeMessengerSenders.has(activeKey)) {
     console.log(`[messenger-poll] skipped active webhook reply page=${pageId} sender=${customerProfile.id}`);
@@ -1290,8 +1314,45 @@ function isOrderConfirmationPageMessage(text) {
 }
 
 function detectNewOrderForNotification(pageId, recipientId, customerProfile, messages, options = {}) {
+  // ── AI-first order extraction (opt-in, safe fallback) ──
+  if (config.aiOrderExtractionEnabled) {
+    try {
+      const aiOrder = extractOrderFromAIExtractor(messages, pageId, recipientId);
+      if (aiOrder) {
+        const productText = `${aiOrder.productName} - ${String(aiOrder.quantity).padStart(2, '0')} ${aiOrder.package === '5L' ? 'can' : 'can'} ${aiOrder.package}`;
+        const pageNameFallbacks = new Map([
+          ["625538103984936", "BẢN MỘC"],
+          ["530612146800283", "BẢN MỘC 2"],
+          ["496197620253645", "BẢN MỘC 3"],
+          ["113433985286803", "BẢN MỘC 4"]
+        ]);
+        console.log(`[ai-order] AI extracted order page=${pageId || "unknown"} customer=${recipientId} product=${productText} isAddOn=${aiOrder.isAddOn}`);
+        return {
+          pageId,
+          pageName: pageNameFallbacks.get(String(pageId)) || `Page ${pageId || "unknown"}`,
+          recipientId,
+          customerName: customerProfile?.name || "Khách",
+          product: productText,
+          phone: aiOrder.phone,
+          address: aiOrder.address,
+          productAmount: aiOrder.productAmount,
+          shippingAmount: aiOrder.shippingAmount,
+          totalAmount: aiOrder.totalAmount,
+          sourceAt: Number(options.sourceAt || Date.now()),
+          sourceMessageId: options.sourceMessageId || "",
+          signatureDate: options.signatureDate || new Date().toISOString().slice(0, 10)
+        };
+      }
+    } catch (err) {
+      console.warn(`[ai-order] extraction failed, falling back to parser: ${err.message}`);
+    }
+  }
+
   const repeatOrder = detectRepeatCustomerOrder(pageId, recipientId, customerProfile, messages, options);
   if (repeatOrder) return repeatOrder;
+
+  const addOnOrder = detectRepeatCustomerAddOnOrder(pageId, recipientId, customerProfile, messages, options);
+  if (addOnOrder) return addOnOrder;
 
   const recentMessages = (messages || [])
     .filter((message) => message?.created_time && typeof message.message === "string")
@@ -1401,14 +1462,85 @@ function detectRepeatCustomerOrder(pageId, recipientId, customerProfile, message
   };
 }
 
+function detectRepeatCustomerAddOnOrder(pageId, recipientId, customerProfile, messages, options = {}) {
+  const ordered = (messages || [])
+    .filter((message) => message?.created_time && typeof message.message === "string")
+    .sort((a, b) => new Date(a.created_time) - new Date(b.created_time));
+  const customerMessages = ordered.filter((message) => String(message?.from?.id || "") !== String(pageId));
+  const latest = customerMessages.at(-1);
+  if (!latest) return null;
+
+  const latestText = String(latest.message || "");
+  const normalized = normalizeSearchText(latestText)
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  const quantity = parseOrderNotifyQuantity(latestText);
+  if (!quantity || !/\b(them|lay them|cho them|gui them|dat them|mua them)\b/u.test(normalized)) return null;
+
+  const latestAt = new Date(latest.created_time).getTime();
+  const sourceAt = Number(options.sourceAt || latestAt || Date.now());
+  if (Math.abs(sourceAt - latestAt) > 10 * 60 * 1000) return null;
+
+  const previousPageMessages = ordered
+    .filter((message) => String(message?.from?.id || "") === String(pageId))
+    .filter((message) => new Date(message.created_time).getTime() < latestAt)
+    .reverse();
+  const previousConfirmation = previousPageMessages.find((message) => isOrderConfirmationPageMessage(message.message || ""));
+  if (!previousConfirmation) return null;
+
+  const priorText = String(previousConfirmation.message || "");
+  const priorProductNames = extractOrderNotifyProductNames(priorText).filter((name) => name !== "rượu");
+  const explicitProductNames = extractOrderNotifyProductNames(latestText).filter((name) => name !== "rượu");
+  const productName = explicitProductNames[0] || priorProductNames[0] || "";
+  const phones = extractPhonesFromText(priorText);
+  const addressLine = priorText
+    .split(/\r?\n/u)
+    .map((line) => stripOrderNotifyLinePrefix(line))
+    .find((line) => /^(địa chỉ|dia chi|đc|dc)\s*[:：-]/iu.test(line));
+  const address = cleanOrderNotifyAddress(addressLine || "");
+  if (!productName || phones.length === 0 || !address || /^(cũ|cu)$/iu.test(address)) return null;
+
+  const product = `${productName} - ${formatOrderNotifyQuantity(quantity)}`;
+  const productAmount = estimateOrderNotifyProductAmount(quantity);
+  const shippingAmount = estimateOrderNotifyShippingAmount(quantity, productAmount);
+  return {
+    pageId,
+    pageName: pageNameFallbacks.get(String(pageId)) || `Page ${pageId || "unknown"}`,
+    recipientId,
+    customerName: customerProfile?.name || latest?.from?.name || "Khách",
+    product,
+    phone: phones[0],
+    address,
+    productAmount,
+    shippingAmount,
+    totalAmount: productAmount + shippingAmount,
+    sourceAt,
+    sourceMessageId: options.sourceMessageId || latest.id || "",
+    signatureDate: formatOrderNotifyDateKey(sourceAt)
+  };
+}
+
 function shouldConfirmOrderDetailsFromCustomer(text, messages, pageId) {
   const customerText = String(text || "");
+  const normalizedCurrent = normalizeSearchText(customerText)
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
 
   // Customer is asking about EXISTING order — NOT a new order
   if (isExistingOrderInquiry(customerText)) return false;
 
-  // DON'T re-confirm if we already confirmed for this customer recently (within 5 minutes)
-  const senderId = messages?.[0]?.from?.id;
+  const orderedMessages = (messages || [])
+    .filter((message) => message?.created_time)
+    .sort((a, b) => new Date(a.created_time) - new Date(b.created_time));
+  const latestCustomerMessage = orderedMessages
+    .filter((message) => String(message?.from?.id || "") !== String(pageId))
+    .at(-1);
+
+  // DON'T re-confirm if we already confirmed for this customer recently (within 5 minutes).
+  // Meta history order is not stable, so never derive the sender from messages[0].
+  const senderId = latestCustomerMessage?.from?.id;
   const lastOrderConfirmKey = `order-confirm:${pageId || "unknown"}:${senderId || "unknown"}`;
   const lastOrderConfirmAt = Number(messengerPollState.lastOrderConfirmations?.[lastOrderConfirmKey] || 0);
   if (lastOrderConfirmAt && (Date.now() - lastOrderConfirmAt) < 5 * 60 * 1000) {
@@ -1435,10 +1567,16 @@ function shouldConfirmOrderDetailsFromCustomer(text, messages, pageId) {
     .replace(/\s+/gu, " ")
     .trim();
 
-  // Customer gave contact info in current message OR recent messages
-  const customerGavePhone = extractPhonesFromText(customerText).length > 0 || extractPhonesFromText(recentCustomerText).length > 0;
-  const customerGaveAddress = extractDetailedAddressLinesFromText(customerText).length > 0 || extractDetailedAddressLinesFromText(recentCustomerText).length > 0;
+  // Customer gave contact info in current message OR recent messages.
+  // Historical contact data may complete a new order, but must never make a
+  // non-order follow-up look like a fresh order by itself.
+  const currentGavePhone = extractPhonesFromText(customerText).length > 0;
+  const currentGaveAddress = extractDetailedAddressLinesFromText(customerText).length > 0;
+  const customerGavePhone = currentGavePhone || extractPhonesFromText(recentCustomerText).length > 0;
+  const customerGaveAddress = currentGaveAddress || extractDetailedAddressLinesFromText(recentCustomerText).length > 0;
   const customerGaveContactDetails = customerGavePhone || customerGaveAddress;
+  const currentStartsOrChangesOrder = Boolean(parseOrderNotifyQuantity(customerText)) &&
+    /\b(cho|lay|dat|mua|gui|giao|them|chot)\b/u.test(normalizedCurrent);
 
   // Page asked for order details
   const pageAskedForOrderDetails = [
@@ -1455,7 +1593,8 @@ function shouldConfirmOrderDetailsFromCustomer(text, messages, pageId) {
     return true;
   }
 
-  return customerGaveContactDetails && pageAskedForOrderDetails;
+  return (currentGavePhone || currentGaveAddress || currentStartsOrChangesOrder) &&
+    customerGaveContactDetails && pageAskedForOrderDetails;
 }
 
 function isExistingOrderInquiry(text) {
@@ -1646,7 +1785,7 @@ function stripOrderNotifyLinePrefix(value) {
 }
 
 function parseOrderNotifyQuantity(text) {
-  const match = String(text || "").match(/\b(\d+)\s*(túi|tui|can|l|lit|lít)\b(?:\s*(\d+)\s*(l|lit|lít))?/iu);
+  const match = String(text || "").match(/\b(\d+)\s*(túi|tui|can|l|lit|lít)(?:\s*(\d+)\s*(l|lit|lít))?\b/iu);
   if (!match) return null;
   const amount = Number.parseInt(match[1], 10);
   if (!Number.isFinite(amount) || amount <= 0) return null;
@@ -1758,6 +1897,7 @@ function formatOrderNotifyDateKey(timestamp) {
 
 function maybeScheduleSalesFollowUp(pageId, recipientId, customerProfile, text, sourceMessageAt) {
   if (!config.salesFollowUpEnabled || !pageId || !recipientId) return;
+  if (config.disabledMessengerPageIds.has(String(pageId))) return;
   if (!shouldScheduleSalesFollowUpForText(text)) return;
 
   const delayMs = Math.max(config.salesFollowUpDelayMinutes, 1) * 60 * 1000;
@@ -1811,6 +1951,12 @@ async function processDueSalesFollowUps() {
   const dueEntries = Object.entries(pending).filter(([, item]) => Number(item?.scheduledAt || 0) <= Date.now());
   for (const [key, item] of dueEntries) {
     try {
+      if (config.disabledMessengerPageIds.has(String(item?.pageId || ""))) {
+        delete messengerPollState.pendingSalesFollowUps[key];
+        saveMessengerPollState();
+        console.log(`[sales-follow-up] cleared disabled page=${item?.pageId} recipient=${item?.recipientId}`);
+        continue;
+      }
       const shouldSend = await shouldSendSalesFollowUp(item);
       if (shouldSend) {
         await sendMessengerText(item.pageId, item.recipientId, buildSalesFollowUpText(item));
@@ -1989,7 +2135,20 @@ function extractDetailedAddressLinesFromText(text) {
   return String(text || "")
     .split(/\r?\n/u)
     .map((line) => line.trim())
-    .filter((line) => line && (addressPattern.test(line) || looksLikeStreetAddress(line)) && isDetailedAddressText(line) && !isPriceOrQuestionLine(line));
+    .filter((line) => line && !isOrderIntentOrContactLineWithoutAddress(line) && (addressPattern.test(line) || looksLikeStreetAddress(line)) && isDetailedAddressText(line) && !isPriceOrQuestionLine(line));
+}
+
+function isOrderIntentOrContactLineWithoutAddress(line) {
+  const normalized = normalizeSearchText(line)
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .replace(/\s+/gu, " ")
+    .trim();
+  const hasConcreteAddressMarker = /\b(dia chi|so nha|sn|thon|xom|ap|duong|ngo|ngach|hem|xa|phuong|thi tran|huyen|quan|thi xa|thanh pho|tp|tinh|da nang|ha noi|ho chi minh|hai phong|can tho)\b/u.test(normalized);
+  if (hasConcreteAddressMarker) return false;
+  const hasOrderQuantity = /\b\d+\s*(can|tui|lit|l)\s*\d*\b/u.test(normalized);
+  const hasOrderIntent = /\b(cho|lay|dat|mua|gui|giao|them|chot)\b/u.test(normalized);
+  const isContactPlatformLine = /\b(zalo|ket ban|nhan tin)\b/u.test(normalized);
+  return (hasOrderQuantity && hasOrderIntent) || isContactPlatformLine;
 }
 
 function isPriceOrQuestionLine(line) {
@@ -2667,7 +2826,12 @@ async function askHermesCli(pageId, senderId, customerProfile, text, options = {
     "Truoc khi tra loi, hay doc ky toan bo lich su hoi thoai va noi dung khach hoi de hieu dung cau hoi. Tra loi bang tieng Viet ngan gon, dung vai tro nhan vien ban hang Ban Moc. Khong nhac den he thong noi bo. Khong chao hoi neu khach dang trong mach hoi thoai. QUAN TRONG: Khong bao gio hua mien ship cho don 1 tui (phai tinh 20k ship). Khong hua hen ngay gio giao hang cu the (chi noi se giao som nhat co the). KHONG TU Y NOI VE CHUYEN KHOAN / THANH TOAN — ben em chi ship COD, khach khong can chuyen khoan truoc."
   ].join("\n");
 
-  const result = await runCommand(config.hermesCliBin, [message], {
+  const result = await runCommand(config.hermesDirectBin, [
+    "--provider", config.hermesDirectProvider,
+    "-m", config.hermesDirectModel,
+    "--ignore-rules",
+    "-z", message
+  ], {
     timeoutMs: config.hermesCliTimeoutSeconds * 1000 + 5000
   });
 
@@ -3018,28 +3182,6 @@ function buildOpenClawCommentMessage(pageId, commentId, postId, customerProfile,
     "Binh luan khach vua gui:",
     text
   ].join("\n");
-}
-
-function extractCustomerShortName(customerProfile) {
-  const candidates = [
-    customerProfile?.name,
-    customerProfile?.firstName
-  ];
-
-  for (const candidate of candidates) {
-    const shortName = lastNamePart(candidate);
-    if (shortName) return shortName;
-  }
-
-  return "";
-}
-
-function lastNamePart(name) {
-  const parts = String(name || "")
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
-  return parts[parts.length - 1] || "";
 }
 
 function readRequestBody(req) {

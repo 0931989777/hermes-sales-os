@@ -135,7 +135,7 @@ custom_providers:
   name: Cheapkeyai
 - api_key: sk-kFc3qtGSy30McL8sAYdzWMQfqjLvqUgCyH6Ciq65yZZOa5cA
   base_url: https://api.ai-box.vn/v1
-  model: deepseek-v4-pro
+  model: deepseek-v4-pro[1m]
   name: APIBOX
 - api_key: sk-139e43662cce9a57-jx8r2i-47166e40
   base_url: http://173.212.241.127:20128/v1

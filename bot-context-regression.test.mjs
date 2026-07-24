@@ -203,6 +203,92 @@ test('repeat customer can reuse old phone and address for a new order', () => {
   assert.match(reply, /Tổng tiền: 1\.320\.000đ/i);
 });
 
+test('repeat customer add-on order uses the newest explicit quantity and inherits only stable prior details', () => {
+  const pageId = '625538103984936';
+  const customerId = 'test-repeat-add-on-customer';
+  const messages = [
+    {
+      id: 'prior-customer-order',
+      created_time: '2026-07-23T13:55:10Z',
+      from: { id: customerId, name: 'Nguyen Son Lam' },
+      message: 'Cho anh 4can này nữa nhé về địa chỉ cũ'
+    },
+    {
+      id: 'prior-confirmation',
+      created_time: '2026-07-23T14:34:11Z',
+      from: { id: pageId, name: 'BẢN MỘC' },
+      message: [
+        'Dạ em xin xác nhận lại đơn của Anh Lam ạ.',
+        '',
+        '• Sản phẩm: rượu tam giác mạch - 04 can 5L',
+        '• SĐT: 0965378868',
+        '• Địa chỉ: Khối 4, thị trấn Quỳ Hợp, huyện Quỳ Hợp, Nghệ An',
+        '• Tổng tiền: 1.320.000đ',
+        '',
+        'Em chốt đơn và chuyển bộ phận đóng hàng/giao hàng cho mình ạ.'
+      ].join('\n')
+    },
+    {
+      id: 'add-eight',
+      created_time: '2026-07-24T01:05:57Z',
+      from: { id: customerId, name: 'Nguyen Son Lam' },
+      message: 'Cho anh thêm 8 can5 lít nữa nhé,anh nhắn kết bạn zalo rồi em'
+    }
+  ];
+
+  const order = __test.detectNewOrderForNotification(pageId, customerId, { name: 'Nguyen Son Lam' }, messages, {
+    sourceAt: Date.parse('2026-07-24T01:05:57Z'),
+    sourceMessageId: 'add-eight'
+  });
+
+  assert.deepEqual(
+    __test.extractDetailedAddressLinesFromText('Cho anh thêm 8 can5 lít nữa nhé,anh nhắn kết bạn zalo rồi em'),
+    []
+  );
+  assert.ok(order);
+  assert.equal(order.product, 'rượu tam giác mạch - 08 can 5L');
+  assert.equal(order.phone, '0965378868');
+  assert.equal(order.address, 'Khối 4, thị trấn Quỳ Hợp, huyện Quỳ Hợp, Nghệ An');
+  assert.equal(order.productAmount, 2640000);
+  assert.equal(order.shippingAmount, 0);
+  assert.equal(order.totalAmount, 2640000);
+  assert.equal(order.sourceMessageId, 'add-eight');
+  const reply = __test.buildOrderDetailsConfirmationReply(order, { name: 'Nguyen Son Lam' });
+  assert.match(reply, /Sản phẩm: rượu tam giác mạch - 08 can 5L/i);
+  assert.match(reply, /Tổng tiền: 2\.640\.000đ/i);
+  assert.doesNotMatch(reply, /04 can|4\.800\.000đ/i);
+});
+
+test('non-order follow-up after an add-on order never triggers another confirmation', () => {
+  const pageId = '625538103984936';
+  const customerId = 'test-non-order-follow-up-customer';
+  const messages = [
+    {
+      id: 'add-eight',
+      created_time: '2026-07-24T01:05:57Z',
+      from: { id: customerId, name: 'Nguyen Son Lam' },
+      message: 'Cho anh thêm 8 can5 lít nữa nhé,anh nhắn kết bạn zalo rồi em'
+    },
+    {
+      id: 'bot-confirmation',
+      created_time: '2026-07-24T01:06:25Z',
+      from: { id: pageId, name: 'BẢN MỘC' },
+      message: 'Sản phẩm: rượu tam giác mạch - 08 can 5L\nSĐT: 0965378868\nĐịa chỉ: Khối 4, thị trấn Quỳ Hợp, huyện Quỳ Hợp, Nghệ An\nEm chốt đơn.'
+    },
+    {
+      id: 'gift-follow-up',
+      created_time: '2026-07-24T01:06:44Z',
+      from: { id: customerId, name: 'Nguyen Son Lam' },
+      message: 'Đúng loại anh vẫn mua đó nhé,để anh làm quà'
+    }
+  ];
+
+  assert.equal(
+    __test.shouldConfirmOrderDetailsFromCustomer('Đúng loại anh vẫn mua đó nhé,để anh làm quà', messages, pageId),
+    false
+  );
+});
+
 test('customer contact details after order quote are detected as an order', () => {
   const pageId = '560889237118933';
   const customerId = '36844049428575012';
